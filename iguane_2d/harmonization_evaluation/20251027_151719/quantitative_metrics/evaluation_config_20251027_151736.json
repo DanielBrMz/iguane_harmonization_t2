@@ -1,0 +1,17 @@
+{
+  "timestamp": "20251027_151736",
+  "test_data": "processed_data_4slice_fixed/test_4slice_data.pkl",
+  "weight_dir": "weights/cyclegan_2d",
+  "epochs_evaluated": [
+    150,
+    200,
+    "final"
+  ],
+  "max_samples_per_site": 100,
+  "n_test_samples": 508,
+  "sites_evaluated": [
+    "TMC",
+    "VGH_Site3_Siemens",
+    "VGH_Site4_GE"
+  ]
+}
