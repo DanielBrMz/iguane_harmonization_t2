@@ -1,24 +1,65 @@
-# IGUANe harmonization
+# IGUANe Harmonization
 
 <img align='right' src="iguane.png" width="160">
 
-This repository provides code to use the IGUANe model for harmonization of MR images. The full method as well as validation experiments are detailled in a [peer-reviewed publication](https://doi.org/10.1016/j.media.2024.103388). The model has been trained for harmonization of T1-weighted brain images and is currently being adapted for T2-weighted fetal brain images.
+This repository provides code for IGUANe-based harmonization of MR images. The project contains two main implementations:
 
-Scripts in this repository work on files in Nifti format with **.nii.gz** extension.
+1. **IGUANe Original** - 3D harmonization for T1-weighted adult brain images (published in [Medical Image Analysis](https://doi.org/10.1016/j.media.2024.103388))
+2. **IGUANe 2D** - 2D CycleGAN-based harmonization for T2-weighted fetal brain images (in development)
 
+## Repository Structure
 
-## Table of contents
+```
+iguane_harmonization/
+├── iguane_original/          # Original 3D T1-weighted harmonization
+│   ├── all_in_one.py         # Full inference pipeline
+│   ├── pipeline.py           # Core pipeline functions
+│   ├── preprocessing/        # Preprocessing tools
+│   ├── harmonization/        # Model and training
+│   ├── prediction/           # Prediction models
+│   └── metadata/             # Dataset metadata
+│
+├── iguane_2d/                # 2D Fetal brain harmonization
+│   ├── data/                 # Dataset CSV files
+│   ├── training/             # Training scripts
+│   ├── preprocessing/        # Data preparation
+│   ├── evaluation/           # Evaluation scripts
+│   ├── harmonization/        # Inference scripts
+│   └── logs/                 # Training logs
+│
+├── requirements.txt          # Python dependencies
+├── iguane.yml               # Conda environment
+└── README.md                # This file
+```
 
-- [Installation instructions](#installation-instructions)
-  - [Anaconda environment](#anaconda-environment)
-  - [Preprocessing tools](#preprocessing-tools)
-- [All-in-one](#all-in-one)
-- [Preprocessing](#preprocessing)
-- [Harmonization inference](#harmonization-inference)
-- [Harmonization training](#harmonization-training)
-- [T2-weighted adaptation notes](#t2-weighted-adaptation-notes)
-- [Prediction models](#prediction-models)
-- [Metadata](#metadata)
+## Quick Start
+
+### IGUANe Original (3D T1-weighted)
+
+For detailed instructions, see [`iguane_original/README.md`](iguane_original/README.md)
+
+```bash
+cd iguane_original
+python all_in_one.py --in-mri input.nii.gz --out-mri output.nii.gz
+```
+
+### IGUANe 2D (Fetal brain)
+
+For detailed instructions, see [`iguane_2d/README.md`](iguane_2d/README.md)
+
+```bash
+cd iguane_2d/training
+python train_fetal_2d_cyclegan.py
+```
+
+## Table of Contents
+
+- [Installation Instructions](#installation-instructions)
+  - [Anaconda Environment](#anaconda-environment)
+  - [Preprocessing Tools](#preprocessing-tools)
+- [IGUANe Original - T1-weighted](#iguane-original---t1-weighted)
+- [IGUANe 2D - Fetal Brain](#iguane-2d---fetal-brain)
+- [Citation](#citation)
 
 
 ## Installation instructions
@@ -174,4 +215,64 @@ For inference, you must be in the *./prediction* directory.
 
 ## Metadata
 
-We provide the metadata for the different datasets we used in our study in the *./metadata/* directory.
+We provide the metadata for the different datasets we used in our study in the `iguane_original/metadata/` directory.
+
+---
+
+## IGUANe Original - T1-weighted
+
+The original IGUANe implementation provides harmonization of 3D T1-weighted adult brain MR images. The model has been validated across multiple sites and scanners as described in our [publication](https://doi.org/10.1016/j.media.2024.103388).
+
+**Key Features:**
+- Full preprocessing pipeline (registration, skull-stripping, bias correction)
+- Pre-trained weights for immediate use
+- All-in-one inference script
+- Custom training support
+
+For complete documentation, see [`iguane_original/README.md`](iguane_original/README.md)
+
+---
+
+## IGUANe 2D - Fetal Brain
+
+The IGUANe 2D implementation adapts the harmonization approach for 2D fetal brain T2-weighted MR images using a CycleGAN architecture with gestational age conditioning.
+
+**Key Features:**
+- 2D slice-based harmonization
+- Gestational age conditioning
+- Multi-site fetal brain data support
+- Comprehensive evaluation pipeline
+- Training with collapse prevention
+
+**Status:** In development - not yet validated for clinical use
+
+For complete documentation, see [`iguane_2d/README.md`](iguane_2d/README.md)
+
+---
+
+## Citation
+
+If you use IGUANe Original in your research, please cite:
+
+```bibtex
+@article{iguane2024,
+  title={IGUANe: a 3D generalizable CycleGAN for multicenter harmonization of brain MR images},
+  journal={Medical Image Analysis},
+  year={2024},
+  doi={10.1016/j.media.2024.103388}
+}
+```
+
+---
+
+## License
+
+[Add license information here]
+
+---
+
+## Contact
+
+For questions or issues:
+- Open an issue on GitHub
+- [Add contact information]
