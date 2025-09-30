@@ -2,7 +2,7 @@
 
 <img align='right' src="iguane.png" width="160">
 
-This repository provides code to use the IGUANe model for harmonization of MR images. The full method as well as validation experiments are detailled in a [peer-reviewed publication](https://doi.org/10.1016/j.media.2024.103388). The model has been trained for harmonization of T1-weighted brain images.
+This repository provides code to use the IGUANe model for harmonization of MR images. The full method as well as validation experiments are detailled in a [peer-reviewed publication](https://doi.org/10.1016/j.media.2024.103388). The model has been trained for harmonization of T1-weighted brain images and is currently being adapted for T2-weighted fetal brain images.
 
 Scripts in this repository work on files in Nifti format with **.nii.gz** extension.
 
@@ -16,6 +16,7 @@ Scripts in this repository work on files in Nifti format with **.nii.gz** extens
 - [Preprocessing](#preprocessing)
 - [Harmonization inference](#harmonization-inference)
 - [Harmonization training](#harmonization-training)
+- [T2-weighted adaptation notes](#t2-weighted-adaptation-notes)
 - [Prediction models](#prediction-models)
 - [Metadata](#metadata)
 
@@ -104,6 +105,48 @@ To train your own harmonization model, you can use the script *./harmonization/t
 You can change the image shape in *./harmonization/training/input_pipeline/constants.py*. A GPU needs to be available to run this script.
 
 You must be in the *./harmonization/training* directory to use this script.
+
+
+## T2-weighted adaptation notes
+
+### Current status
+
+The IGUANe model is being adapted for harmonization of T2-weighted fetal brain MR images. This adaptation is currently in the training phase and has not yet been validated. The T2 model should not be used for clinical decision-making.
+
+### Intended application
+
+- **Target population:** Fetal brains at 20-32 weeks gestational age
+- **Scanner type:** Philips Achieva 3T (based on dHCP acquisition protocol)
+- **Field strength:** 3 Tesla
+
+### Implementation details
+
+The T2 adaptation uses the same preprocessing pipeline as the T1 model with the following considerations:
+
+1. **Preprocessing steps:** The six-step preprocessing pipeline described above applies to T2-weighted images. The median intensity normalization to 500 is maintained for consistency with the original implementation.
+
+2. **Brain extraction:** HD-BET was originally trained on adult T1-weighted images. Its performance on fetal T2-weighted images should be validated. If brain extraction quality is insufficient, consider alternative tools specifically designed for fetal brain segmentation.
+
+3. **Registration template:** A fetal-specific T2-weighted template may be more appropriate than the adult MNI152 T1 template. The registration step may require adaptation depending on the target application.
+
+4. **Intensity characteristics:** T2-weighted images have different tissue contrast properties compared to T1-weighted images. The contrast between gray matter, white matter, and CSF is inverted relative to T1. This affects the appearance of harmonized images but the same normalization strategy is applied.
+
+### Validation requirements
+
+Before using the T2 model for any scientific analysis, the following validations are strongly recommended:
+
+- Qualitative assessment of harmonization quality across multiple sites
+- Quantitative evaluation using traveling subject data if available
+- Verification that biological variability (gestational age effects) is preserved
+- Assessment of motion artifact handling specific to fetal imaging
+- Evaluation of preprocessing pipeline performance on fetal T2 data
+
+### Limitations and considerations
+
+- **Motion artifacts:** Fetal imaging is particularly susceptible to motion artifacts. The model's ability to handle severe motion corruption is unknown.
+- **Developmental changes:** Rapid brain development between 20-32 weeks gestational age may present challenges not encountered in adult imaging.
+- **Limited field strength generalization:** Training on 3T data only. Generalization to 1.5T acquisitions has not been evaluated.
+- **Scanner variability:** Multi-site harmonization performance with different scanner manufacturers and sequences remains to be assessed.
 
 
 ## Prediction models
