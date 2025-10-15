@@ -222,7 +222,7 @@ def load_demographics(excel_path):
 def process_dhcp_dataset():
     """
     Special processing for dHCP dataset following Hyeokjin's instructions
-    Uses preprocessed files from best_image_crop folders in nuc directory
+    Files are directly in the nuc directory as *_brain.nii files
     """
     print(f"\nProcessing dHCP (special path)...")
     
@@ -243,17 +243,18 @@ def process_dhcp_dataset():
                 if pd.isna(mr_path):
                     continue
                 
-                # Remove "data_dHCP_test/" and replace "_crop_rsl.nii.gz" with ".nii"
-                # Example: data_dHCP_test/sub-CC00969XX21_ses-25531_run-13_T2w_brain_crop_rsl.nii.gz
-                # becomes: sub-CC00969XX21_ses-25531_run-13_T2w_brain.nii
+                # Convert CSV filename format to actual filename
+                # CSV: data_dHCP_test/sub-CC00969XX21_ses-25531_run-13_T2w_brain_crop_rsl.nii.gz
+                # Actual: sub-CC00969XX21_ses-25531_run-13_T2w_brain.nii
                 mr_filename = mr_path.replace('data_dHCP_test/', '')
                 mr_filename = mr_filename.replace('_crop_rsl.nii.gz', '.nii')
                 
-                # Extract subject ID
+                # Extract subject ID (without session)
                 subject_id = mr_filename.split('_ses-')[0]
                 
                 # Skip if marked as Poor quality
-                if row.get('Poor', False) or str(row.get('Poor', '')).upper() == 'TRUE':
+                poor_value = row.get('Poor', False)
+                if poor_value is True or str(poor_value).upper() in ['TRUE', 'YES', '1']:
                     continue
                 
                 demo_dict[mr_filename] = {
@@ -261,46 +262,63 @@ def process_dhcp_dataset():
                     'GA': pd.to_numeric(row.get('GA at scan', None), errors='coerce'),
                     'Sex': 1 if str(row.get('Gender', '')).upper() == 'MALE' else 0
                 }
+            
+            print(f"  After quality filtering: {len(demo_dict)} files")
+            
         except Exception as e:
             print(f"  Error loading dHCP demographics: {e}")
+            import traceback
+            traceback.print_exc()
     
-    # Find all best_image_crop directories
-    best_img_dirs = []
-    try:
-        for subj_dir in DHCP_PATH.iterdir():
-            if subj_dir.is_dir() and subj_dir.name.startswith('sub-'):
-                best_img_crop = subj_dir / 'best_image_crop'
-                if best_img_crop.exists():
-                    best_img_dirs.append(best_img_crop)
-    except (PermissionError, OSError) as e:
-        print(f"  Error scanning dHCP directory: {e}")
-        return pd.DataFrame()
+    # Get all .nii files directly from the nuc directory
+    nii_files = sorted(DHCP_PATH.glob('sub-*_T2w_brain.nii'))
+    print(f"  Found {len(nii_files)} dHCP stack files")
     
-    print(f"  Found {len(best_img_dirs)} best_image_crop directories")
-    
-    # Process each directory
     rows = []
-    for best_img_dir in best_img_dirs:
-        subject_id = best_img_dir.parent.name  # sub-CC00969XX21_ses-25531
-        subject_base = subject_id.split('_ses-')[0]  # sub-CC00969XX21
+    used_files = 0
+    skipped_files = 0
+    
+    for nii_file in nii_files:
+        filename = nii_file.name
         
-        # Get all .nii files
-        nii_files = sorted(best_img_dir.glob('*.nii'))
-        
-        for nii_file in nii_files:
-            # Check if this file is in our demographics (not marked as Poor)
-            demo = demo_dict.get(nii_file.name, {})
-            
-            if demo or not demo_dict:  # Include if no quality info or passes quality
+        # Check if this file is in our demographics (passes quality check)
+        if demo_dict:
+            # Only use files that passed quality check
+            if filename in demo_dict:
+                demo = demo_dict[filename]
+                subject_id = demo['subject_id']
+                
                 rows.append({
-                    'ID': subject_base,
+                    'ID': subject_id,
                     'MR': str(nii_file.absolute()),
-                    'GA': float(demo.get('GA', 25.0)) if demo else 25.0,
-                    'Sex': int(demo.get('Sex', 0)) if demo else 0,
+                    'GA': float(demo.get('GA', 25.0)),
+                    'Sex': int(demo.get('Sex', 0)),
                     'Site': 'dHCP',
-                    'Quality': None,  # Quality already filtered in CSV
+                    'Quality': None,  # Already filtered by quality CSV
                     'Dataset': 'dHCP'
                 })
+                used_files += 1
+            else:
+                skipped_files += 1
+        else:
+            # If no demographics, use all files
+            subject_id = filename.split('_ses-')[0]
+            rows.append({
+                'ID': subject_id,
+                'MR': str(nii_file.absolute()),
+                'GA': 25.0,
+                'Sex': 0,
+                'Site': 'dHCP',
+                'Quality': None,
+                'Dataset': 'dHCP'
+            })
+            used_files += 1
+    
+    print(f"  Used: {used_files} files, Skipped (Poor quality): {skipped_files} files")
+    
+    if not rows:
+        print(f"  No dHCP data found after filtering")
+        return pd.DataFrame()
     
     df = pd.DataFrame(rows)
     print(f"  Created {len(df)} stack entries from {len(df['ID'].unique())} subjects")
