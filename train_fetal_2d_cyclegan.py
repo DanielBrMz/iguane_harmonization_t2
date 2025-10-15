@@ -504,6 +504,19 @@ def train(args):
         args.val_data
     )
     
+    # Check for NaN values in training data
+    print(f"\nChecking for NaN values in training data:")
+    print(f"  Images: {np.isnan(train_images).sum()} NaN values")
+    print(f"  GA: {np.isnan(train_ga).sum()} NaN values out of {len(train_ga)}")
+    print(f"  GA valid range: {np.nanmin(train_ga):.1f} - {np.nanmax(train_ga):.1f} weeks")
+    
+    # Replace NaN GA values with median
+    if np.isnan(train_ga).any():
+        print(f"  Replacing {np.isnan(train_ga).sum()} NaN GA values with median")
+        train_ga_median = np.nanmedian(train_ga)
+        train_ga = np.where(np.isnan(train_ga), train_ga_median, train_ga)
+        print(f"  New GA range: {train_ga.min():.1f} - {train_ga.max():.1f} weeks")
+    
     # Create site datasets
     train_site_data, ref_site = create_site_datasets(
         train_images, train_ga, train_sex, train_site, args.reference_site
