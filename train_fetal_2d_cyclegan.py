@@ -362,11 +362,15 @@ class CycleGAN2D:
         self.gen_optimizer = Adam(learning_rate=lr, beta_1=beta_1)
         self.disc_optimizer = Adam(learning_rate=lr, beta_1=beta_1)
         
+        # Build optimizers by calling them once
+        # This creates the optimizer variables
+        self.gen_optimizer.build(self.gen_A2B.trainable_variables + self.gen_B2A.trainable_variables)
+        self.disc_optimizer.build(self.disc_A.trainable_variables + self.disc_B.trainable_variables)
+        
         print("✓ Model compiled")
     
-    @tf.function
     def train_step(self, real_A, real_B, ga_A, ga_B):
-        """Single training step"""
+        """Single training step (NOT decorated with @tf.function)"""
         
         with tf.GradientTape(persistent=True) as tape:
             # Forward cycle: A -> B -> A
@@ -414,13 +418,15 @@ class CycleGAN2D:
             disc_A_loss = discriminator_loss(disc_real_A, disc_fake_A)
             disc_B_loss = discriminator_loss(disc_real_B, disc_fake_B)
         
-        # Calculate gradients
+        # Calculate gradients for generators
         gen_A2B_gradients = tape.gradient(
             total_gen_A2B_loss, self.gen_A2B.trainable_variables
         )
         gen_B2A_gradients = tape.gradient(
             total_gen_B2A_loss, self.gen_B2A.trainable_variables
         )
+        
+        # Calculate gradients for discriminators
         disc_A_gradients = tape.gradient(
             disc_A_loss, self.disc_A.trainable_variables
         )
@@ -428,13 +434,15 @@ class CycleGAN2D:
             disc_B_loss, self.disc_B.trainable_variables
         )
         
-        # Apply gradients
+        # Apply gradients to generators
         self.gen_optimizer.apply_gradients(
             zip(gen_A2B_gradients, self.gen_A2B.trainable_variables)
         )
         self.gen_optimizer.apply_gradients(
             zip(gen_B2A_gradients, self.gen_B2A.trainable_variables)
         )
+        
+        # Apply gradients to discriminators
         self.disc_optimizer.apply_gradients(
             zip(disc_A_gradients, self.disc_A.trainable_variables)
         )
@@ -445,12 +453,12 @@ class CycleGAN2D:
         del tape
         
         return {
-            'gen_A2B_loss': total_gen_A2B_loss,
-            'gen_B2A_loss': total_gen_B2A_loss,
-            'disc_A_loss': disc_A_loss,
-            'disc_B_loss': disc_B_loss,
-            'cycle_loss': total_cycle_loss,
-            'identity_loss': total_identity_loss
+            'gen_A2B_loss': total_gen_A2B_loss.numpy(),
+            'gen_B2A_loss': total_gen_B2A_loss.numpy(),
+            'disc_A_loss': disc_A_loss.numpy(),
+            'disc_B_loss': disc_B_loss.numpy(),
+            'cycle_loss': total_cycle_loss.numpy(),
+            'identity_loss': total_identity_loss.numpy()
         }
 
 
@@ -614,20 +622,51 @@ def train(args):
         
         epoch_losses = {k: [] for k in history.keys()}
         
+        # Create iterators
+        ref_iter = iter(ref_dataset)
+        other_iter = iter(other_dataset)
+        
+        # Calculate steps per epoch (use minimum of both datasets)
+        steps_per_epoch = min(
+            len(ref_data['images']) // args.batch_size,
+            len(other_images) // args.batch_size
+        )
+        
+        # Progress bar
+        from tqdm import tqdm
+        pbar = tqdm(range(steps_per_epoch), desc=f"Epoch {epoch+1}")
+        
         # Iterate over batches
-        for (real_A, ga_A), (real_B, ga_B) in zip(ref_dataset, other_dataset):
+        for step in pbar:
+            try:
+                real_A, ga_A = next(ref_iter)
+                real_B, ga_B = next(other_iter)
+            except StopIteration:
+                # Reset iterators if exhausted
+                ref_iter = iter(ref_dataset)
+                other_iter = iter(other_dataset)
+                real_A, ga_A = next(ref_iter)
+                real_B, ga_B = next(other_iter)
             
             losses = cyclegan.train_step(real_A, real_B, ga_A, ga_B)
             
             for k, v in losses.items():
-                epoch_losses[k].append(v.numpy())
+                epoch_losses[k].append(v)
+            
+            # Update progress bar
+            pbar.set_postfix({
+                'G_A2B': f"{losses['gen_A2B_loss']:.3f}",
+                'G_B2A': f"{losses['gen_B2A_loss']:.3f}",
+                'D_A': f"{losses['disc_A_loss']:.3f}",
+                'D_B': f"{losses['disc_B_loss']:.3f}"
+            })
         
         # Average losses
         for k in history.keys():
             avg_loss = np.mean(epoch_losses[k])
             history[k].append(avg_loss)
         
-        # Print progress
+        # Print epoch summary
         print(f"  Gen A2B: {history['gen_A2B_loss'][-1]:.4f} | "
               f"Gen B2A: {history['gen_B2A_loss'][-1]:.4f} | "
               f"Disc A: {history['disc_A_loss'][-1]:.4f} | "
