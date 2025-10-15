@@ -430,13 +430,9 @@ class DataAugmenter:
     @staticmethod
     @tf.function
     def augment(image, ga):
-        """Apply random augmentations"""
-        # Random rotation
-        if tf.random.uniform(()) > 0.5:
-            k = tf.random.uniform((), minval=0, maxval=4, dtype=tf.int32)
-            image = tf.image.rot90(image, k=k)
+        """Apply random augmentations - NO ROTATION to avoid dimension issues"""
         
-        # Random flip
+        # Random flip (these preserve dimensions)
         if tf.random.uniform(()) > 0.5:
             image = tf.image.flip_left_right(image)
         if tf.random.uniform(()) > 0.5:
