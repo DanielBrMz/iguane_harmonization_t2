@@ -606,20 +606,55 @@ def train(args):
                 real_A, ga_A = next(ref_iter)
                 real_B, ga_B = next(other_iter)
             
-            losses = cyclegan.train_step(real_A, real_B, ga_A, ga_B)
+            # Ensure GA has correct shape [batch_size, 1]
+            if len(ga_A.shape) == 1:
+                ga_A = tf.expand_dims(ga_A, axis=-1)
+            if len(ga_B.shape) == 1:
+                ga_B = tf.expand_dims(ga_B, axis=-1)
             
-            for k, v in losses.items():
-                epoch_losses[k].append(v)
+            # Ensure images have correct shape [batch_size, 138, 176, 1]
+            if real_A.shape[1:] != (138, 176, 1):
+                print(f"Warning: real_A has unexpected shape {real_A.shape}")
+                continue
+            if real_B.shape[1:] != (138, 176, 1):
+                print(f"Warning: real_B has unexpected shape {real_B.shape}")
+                continue
             
-            # Update progress bar
-            pbar.set_postfix({
-                'G_A2B': f"{losses['gen_A2B_loss']:.3f}",
-                'G_B2A': f"{losses['gen_B2A_loss']:.3f}",
-                'D_A': f"{losses['disc_A_loss']:.3f}",
-                'D_B': f"{losses['disc_B_loss']:.3f}"
-            })
+            try:
+                losses = cyclegan.train_step(real_A, real_B, ga_A, ga_B)
+                
+                # Check for NaN losses
+                if any(np.isnan(v) for v in losses.values()):
+                    print(f"\nWarning: NaN detected in losses at step {step}")
+                    print(f"  real_A: min={tf.reduce_min(real_A):.3f}, max={tf.reduce_max(real_A):.3f}")
+                    print(f"  real_B: min={tf.reduce_min(real_B):.3f}, max={tf.reduce_max(real_B):.3f}")
+                    print(f"  ga_A: {ga_A[:3].numpy().flatten()}")
+                    print(f"  ga_B: {ga_B[:3].numpy().flatten()}")
+                    continue
+                
+                for k, v in losses.items():
+                    epoch_losses[k].append(v)
+                
+                # Update progress bar
+                pbar.set_postfix({
+                    'G_A2B': f"{losses['gen_A2B_loss']:.3f}",
+                    'G_B2A': f"{losses['gen_B2A_loss']:.3f}",
+                    'D_A': f"{losses['disc_A_loss']:.3f}",
+                    'D_B': f"{losses['disc_B_loss']:.3f}"
+                })
+            except Exception as e:
+                print(f"\nError at step {step}: {e}")
+                print(f"  real_A shape: {real_A.shape}")
+                print(f"  real_B shape: {real_B.shape}")
+                print(f"  ga_A shape: {ga_A.shape}")
+                print(f"  ga_B shape: {ga_B.shape}")
+                continue
         
-        # Average losses
+        # Average losses (skip if no valid losses)
+        if not epoch_losses['gen_A2B_loss']:
+            print(f"Warning: No valid losses for epoch {epoch+1}, skipping...")
+            continue
+            
         for k in history.keys():
             avg_loss = np.mean(epoch_losses[k])
             history[k].append(avg_loss)
