@@ -121,6 +121,7 @@ def build_2d_generator(input_shape=(138, 176, 1), ga_embedding_dim=16, name='gen
     """
     2D U-Net Generator with Gestational Age Conditioning
     Following IGUANe architecture adapted for 2D
+    Fixed to handle dimension mismatches in skip connections
     """
     
     # Image input
@@ -132,25 +133,25 @@ def build_2d_generator(input_shape=(138, 176, 1), ga_embedding_dim=16, name='gen
     ga_embedding = layers.Dense(ga_embedding_dim, activation='relu')(ga_embedding)
     
     # Encoder
-    # Block 1
+    # Block 1 (138x176 -> 138x176)
     x = layers.Conv2D(64, 3, padding='same', activation='relu')(img_input)
     x = layers.Conv2D(64, 3, padding='same', activation='relu')(x)
     skip1 = x
-    x = layers.MaxPooling2D(2)(x)
+    x = layers.MaxPooling2D(2)(x)  # 69x88
     
-    # Block 2
+    # Block 2 (69x88 -> 69x88)
     x = layers.Conv2D(128, 3, padding='same', activation='relu')(x)
     x = layers.Conv2D(128, 3, padding='same', activation='relu')(x)
     skip2 = x
-    x = layers.MaxPooling2D(2)(x)
+    x = layers.MaxPooling2D(2)(x)  # 34x44
     
-    # Block 3
+    # Block 3 (34x44 -> 34x44)
     x = layers.Conv2D(256, 3, padding='same', activation='relu')(x)
     x = layers.Conv2D(256, 3, padding='same', activation='relu')(x)
     skip3 = x
-    x = layers.MaxPooling2D(2)(x)
+    x = layers.MaxPooling2D(2)(x)  # 17x22
     
-    # Block 4 (Bottleneck)
+    # Block 4 (Bottleneck) (17x22 -> 17x22)
     x = layers.Conv2D(512, 3, padding='same', activation='relu')(x)
     x = layers.Conv2D(512, 3, padding='same', activation='relu')(x)
     
@@ -161,23 +162,81 @@ def build_2d_generator(input_shape=(138, 176, 1), ga_embedding_dim=16, name='gen
     x = layers.Concatenate()([x, ga_spatial])
     
     # Decoder
-    # Block 5
-    x = layers.UpSampling2D(2)(x)
+    # Block 5 (17x22 -> 34x44)
+    x = layers.UpSampling2D(2, interpolation='bilinear')(x)
+    
+    # Crop or pad skip3 to match x spatial dimensions
+    if x.shape[1] != skip3.shape[1] or x.shape[2] != skip3.shape[2]:
+        # Calculate cropping/padding needed
+        height_diff = skip3.shape[1] - x.shape[1]
+        width_diff = skip3.shape[2] - x.shape[2]
+        
+        if height_diff > 0 or width_diff > 0:
+            # Crop skip3
+            crop_h = height_diff // 2
+            crop_w = width_diff // 2
+            skip3 = layers.Cropping2D(cropping=((crop_h, height_diff - crop_h), 
+                                               (crop_w, width_diff - crop_w)))(skip3)
+        elif height_diff < 0 or width_diff < 0:
+            # Pad x
+            pad_h = abs(height_diff) // 2
+            pad_w = abs(width_diff) // 2
+            x = layers.ZeroPadding2D(padding=((pad_h, abs(height_diff) - pad_h),
+                                             (pad_w, abs(width_diff) - pad_w)))(x)
+    
     x = layers.Concatenate()([x, skip3])
     x = layers.Conv2D(256, 3, padding='same', activation='relu')(x)
     x = layers.Conv2D(256, 3, padding='same', activation='relu')(x)
     
-    # Block 6
-    x = layers.UpSampling2D(2)(x)
+    # Block 6 (34x44 -> 68x88)
+    x = layers.UpSampling2D(2, interpolation='bilinear')(x)
+    
+    # Crop or pad skip2 to match x spatial dimensions
+    if x.shape[1] != skip2.shape[1] or x.shape[2] != skip2.shape[2]:
+        height_diff = skip2.shape[1] - x.shape[1]
+        width_diff = skip2.shape[2] - x.shape[2]
+        
+        if height_diff > 0 or width_diff > 0:
+            crop_h = height_diff // 2
+            crop_w = width_diff // 2
+            skip2 = layers.Cropping2D(cropping=((crop_h, height_diff - crop_h),
+                                               (crop_w, width_diff - crop_w)))(skip2)
+        elif height_diff < 0 or width_diff < 0:
+            pad_h = abs(height_diff) // 2
+            pad_w = abs(width_diff) // 2
+            x = layers.ZeroPadding2D(padding=((pad_h, abs(height_diff) - pad_h),
+                                             (pad_w, abs(width_diff) - pad_w)))(x)
+    
     x = layers.Concatenate()([x, skip2])
     x = layers.Conv2D(128, 3, padding='same', activation='relu')(x)
     x = layers.Conv2D(128, 3, padding='same', activation='relu')(x)
     
-    # Block 7
-    x = layers.UpSampling2D(2)(x)
+    # Block 7 (68x88 -> 136x176)
+    x = layers.UpSampling2D(2, interpolation='bilinear')(x)
+    
+    # Crop or pad skip1 to match x spatial dimensions
+    if x.shape[1] != skip1.shape[1] or x.shape[2] != skip1.shape[2]:
+        height_diff = skip1.shape[1] - x.shape[1]
+        width_diff = skip1.shape[2] - x.shape[2]
+        
+        if height_diff > 0 or width_diff > 0:
+            crop_h = height_diff // 2
+            crop_w = width_diff // 2
+            skip1 = layers.Cropping2D(cropping=((crop_h, height_diff - crop_h),
+                                               (crop_w, width_diff - crop_w)))(skip1)
+        elif height_diff < 0 or width_diff < 0:
+            pad_h = abs(height_diff) // 2
+            pad_w = abs(width_diff) // 2
+            x = layers.ZeroPadding2D(padding=((pad_h, abs(height_diff) - pad_h),
+                                             (pad_w, abs(width_diff) - pad_w)))(x)
+    
     x = layers.Concatenate()([x, skip1])
     x = layers.Conv2D(64, 3, padding='same', activation='relu')(x)
     x = layers.Conv2D(64, 3, padding='same', activation='relu')(x)
+    
+    # Final resize to match input exactly (in case of any remaining mismatch)
+    if x.shape[1] != input_shape[0] or x.shape[2] != input_shape[1]:
+        x = layers.Resizing(input_shape[0], input_shape[1])(x)
     
     # Output
     output = layers.Conv2D(1, 1, padding='same', activation='sigmoid')(x)
