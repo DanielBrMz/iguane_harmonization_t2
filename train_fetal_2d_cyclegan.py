@@ -679,17 +679,17 @@ def train(args):
         # Save checkpoints
         if (epoch + 1) % args.save_freq == 0:
             print(f"  Saving checkpoint at epoch {epoch+1}")
-            cyclegan.gen_A2B.save_weights(weight_dir / f'gen_A2B_epoch_{epoch+1}.h5')
-            cyclegan.gen_B2A.save_weights(weight_dir / f'gen_B2A_epoch_{epoch+1}.h5')
-            cyclegan.disc_A.save_weights(weight_dir / f'disc_A_epoch_{epoch+1}.h5')
-            cyclegan.disc_B.save_weights(weight_dir / f'disc_B_epoch_{epoch+1}.h5')
+            cyclegan.gen_A2B.save_weights(weight_dir / f'gen_A2B_epoch_{epoch+1}.weights.h5')
+            cyclegan.gen_B2A.save_weights(weight_dir / f'gen_B2A_epoch_{epoch+1}.weights.h5')
+            cyclegan.disc_A.save_weights(weight_dir / f'disc_A_epoch_{epoch+1}.weights.h5')
+            cyclegan.disc_B.save_weights(weight_dir / f'disc_B_epoch_{epoch+1}.weights.h5')
     
     # Save final models
     print("\nSaving final models...")
-    cyclegan.gen_A2B.save_weights(weight_dir / 'gen_A2B_final.h5')
-    cyclegan.gen_B2A.save_weights(weight_dir / 'gen_B2A_final.h5')
-    cyclegan.disc_A.save_weights(weight_dir / 'disc_A_final.h5')
-    cyclegan.disc_B.save_weights(weight_dir / 'disc_B_final.h5')
+    cyclegan.gen_A2B.save_weights(weight_dir / 'gen_A2B_final.weights.h5')
+    cyclegan.gen_B2A.save_weights(weight_dir / 'gen_B2A_final.weights.h5')
+    cyclegan.disc_A.save_weights(weight_dir / 'disc_A_final.weights.h5')
+    cyclegan.disc_B.save_weights(weight_dir / 'disc_B_final.weights.h5')
     
     # Save history
     history_df = pd.DataFrame(history)
