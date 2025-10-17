@@ -278,7 +278,7 @@ def generator_loss(fake_output):
 # CYCLEGAN MODEL - FIXED with TWO GENERATORS
 # ============================================================================
 
-class CycleGAN2D_MultiSite_FIXED:
+class CycleGAN2D_MultiSite:
     """
     CORRECT 2D CycleGAN with TWO generators and multiple discriminators
     """
@@ -545,7 +545,7 @@ def train(args):
     print("BUILDING MODEL")
     print("="*80)
     
-    cyclegan = CycleGAN2D_MultiSite_FIXED(
+    cyclegan = CycleGAN2D_MultiSite(
         img_shape=(138, 176, 1), 
         ga_embedding_dim=args.ga_embedding_dim,
         target_sites=target_sites
@@ -743,12 +743,12 @@ def train(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Train FIXED 2D CycleGAN for fetal brain harmonization'
+        description='Train 2D CycleGAN for fetal brain harmonization'
     )
     
     # Data
-    parser.add_argument('--train_data', default='processed_data_4slice_fixed/train_4slice_data.pkl')
-    parser.add_argument('--val_data', default='processed_data_4slice_fixed/val_4slice_data.pkl')
+    parser.add_argument('--train_data', default='processed_data_4slice/train_4slice_data.pkl')
+    parser.add_argument('--val_data', default='processed_data_4slice/val_4slice_data.pkl')
     parser.add_argument('--reference_site', default='BCH_CHD')
     
     # Model
@@ -761,9 +761,9 @@ def main():
     parser.add_argument('--beta_1', type=float, default=0.5)
     
     # Output
-    parser.add_argument('--weight_dir', default='./weights/cyclegan_2d_fixed')
-    parser.add_argument('--result_dir', default='./results/cyclegan_2d_fixed')
-    parser.add_argument('--log_dir', default='./logs/cyclegan_2d_fixed')
+    parser.add_argument('--weight_dir', default='./weights/cyclegan_2d')
+    parser.add_argument('--result_dir', default='./results/cyclegan_2d')
+    parser.add_argument('--log_dir', default='./logs/cyclegan_2d')
     parser.add_argument('--save_freq', type=int, default=25)  # More frequent saves
     
     # Hardware
