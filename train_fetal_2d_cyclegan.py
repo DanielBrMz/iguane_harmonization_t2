@@ -759,7 +759,7 @@ def train(args):
         
         site_iters = {name: iter(dataset) for name, dataset in site_datasets.items()}
         
-        steps_per_epoch = min([
+        steps_per_epoch = max([
             len(train_site_data[s]['images']) // args.batch_size 
             for s in train_site_data.keys()
         ])
