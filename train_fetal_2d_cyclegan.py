@@ -754,7 +754,7 @@ def main():
     # Model
     parser.add_argument('--ga_embedding_dim', type=int, default=16)
     
-    # Training (SAFER DEFAULTS)
+    # Training 
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--batch_size', type=int, default=16)  # Reduced from 32
     parser.add_argument('--lr', type=float, default=0.0001)  # Reduced from 0.0002
