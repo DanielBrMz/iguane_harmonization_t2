@@ -296,20 +296,34 @@ def generator_loss(fake_output):
 # CYCLEGAN MODEL
 # ============================================================================
 
-class CycleGAN2D:
-    """2D CycleGAN for multi-site harmonization"""
+class CycleGAN2D_MultiSite:
+    """
+    2D CycleGAN with ONE generator but MULTIPLE discriminators (one per site)
+    Following the paper: BCH harmonizes to all sites using site-specific discriminators
+    """
     
-    def __init__(self, img_shape=(138, 176, 1), ga_embedding_dim=16):
+    def __init__(self, img_shape=(138, 176, 1), ga_embedding_dim=16, target_sites=None):
         self.img_shape = img_shape
         self.ga_embedding_dim = ga_embedding_dim
+        self.target_sites = target_sites or []
         
-        # Build generators
-        self.gen_A2B = build_2d_generator(img_shape, ga_embedding_dim, name='gen_A2B')
-        self.gen_B2A = build_2d_generator(img_shape, ga_embedding_dim, name='gen_B2A')
+        print(f"\nBuilding CycleGAN with {len(self.target_sites)} site-specific discriminators:")
+        for site in self.target_sites:
+            print(f"  - {site}")
         
-        # Build discriminators
-        self.disc_A = build_2d_discriminator(img_shape, ga_embedding_dim, name='disc_A')
-        self.disc_B = build_2d_discriminator(img_shape, ga_embedding_dim, name='disc_B')
+        # Build ONE generator for BCH → harmonized
+        self.gen_harmonize = build_2d_generator(img_shape, ga_embedding_dim, name='gen_harmonize')
+        
+        # Build ONE discriminator for BCH (reference)
+        self.disc_BCH = build_2d_discriminator(img_shape, ga_embedding_dim, name='disc_BCH')
+        
+        # Build ONE discriminator PER target site
+        self.disc_sites = {}
+        for site in self.target_sites:
+            site_name = site.replace('_', '').replace('-', '')[:20]  # Clean name for TF
+            self.disc_sites[site] = build_2d_discriminator(
+                img_shape, ga_embedding_dim, name=f'disc_{site_name}'
+            )
         
         # Loss weights
         self.lambda_cycle = 10.0
@@ -320,104 +334,148 @@ class CycleGAN2D:
         self.gen_optimizer = Adam(learning_rate=lr, beta_1=beta_1)
         self.disc_optimizer = Adam(learning_rate=lr, beta_1=beta_1)
         
-        # Build optimizers by calling them once
-        # This creates the optimizer variables
-        self.gen_optimizer.build(self.gen_A2B.trainable_variables + self.gen_B2A.trainable_variables)
-        self.disc_optimizer.build(self.disc_A.trainable_variables + self.disc_B.trainable_variables)
+        # Build generator optimizer
+        self.gen_optimizer.build(self.gen_harmonize.trainable_variables)
+        
+        # Build discriminator optimizer with ALL discriminators
+        all_disc_vars = self.disc_BCH.trainable_variables
+        for disc in self.disc_sites.values():
+            all_disc_vars += disc.trainable_variables
+        self.disc_optimizer.build(all_disc_vars)
         
         print("✓ Model compiled")
+        print(f"  Generator parameters: {self.gen_harmonize.count_params():,}")
+        print(f"  BCH Discriminator parameters: {self.disc_BCH.count_params():,}")
+        print(f"  Per-site Discriminator parameters: {self.disc_sites[self.target_sites[0]].count_params():,} × {len(self.target_sites)}")
     
-    def train_step(self, real_A, real_B, ga_A, ga_B):
-        """Single training step (NOT decorated with @tf.function)"""
+    def train_step(self, site_batches):
+        """
+        Single training step with multiple site batches
+        
+        site_batches: dict {
+            'BCH_CHD': (images, ga),
+            'dHCP': (images, ga),
+            'BCH_Placenta': (images, ga),
+            ...
+        }
+        """
         
         with tf.GradientTape(persistent=True) as tape:
-            # Forward cycle: A -> B -> A
-            fake_B = self.gen_A2B([real_A, ga_A], training=True)
-            cycled_A = self.gen_B2A([fake_B, ga_A], training=True)
             
-            # Backward cycle: B -> A -> B
-            fake_A = self.gen_B2A([real_B, ga_B], training=True)
-            cycled_B = self.gen_A2B([fake_A, ga_B], training=True)
+            # Get BCH reference batch
+            real_BCH, ga_BCH = site_batches['BCH_CHD']
             
-            # Identity mapping
-            same_A = self.gen_B2A([real_A, ga_A], training=True)
-            same_B = self.gen_A2B([real_B, ga_B], training=True)
+            # Initialize loss accumulators
+            total_gen_loss = 0.0
+            total_disc_BCH_loss = 0.0
+            total_disc_site_losses = {}
+            total_cycle_loss = 0.0
+            total_identity_loss = 0.0
             
-            # Discriminator outputs
-            disc_real_A = self.disc_A([real_A, ga_A], training=True)
-            disc_fake_A = self.disc_A([fake_A, ga_B], training=True)
+            # For each target site
+            for site_name in self.target_sites:
+                if site_name not in site_batches:
+                    continue
+                
+                real_site, ga_site = site_batches[site_name]
+                disc_site = self.disc_sites[site_name]
+                
+                # Forward: Site → Harmonized (to BCH style)
+                harmonized = self.gen_harmonize([real_site, ga_site], training=True)
+                
+                # Cycle: Site → Harmonized → Site (identity, should preserve)
+                # For simplicity, we assume harmonization should be reversible
+                cycle_site = self.gen_harmonize([harmonized, ga_site], training=True)
+                
+                # Identity: BCH → Harmonized (should stay same)
+                identity_BCH = self.gen_harmonize([real_BCH, ga_BCH], training=True)
+                
+                # Discriminator predictions
+                # BCH discriminator: should distinguish real BCH from harmonized images
+                disc_real_BCH = self.disc_BCH([real_BCH, ga_BCH], training=True)
+                disc_fake_BCH = self.disc_BCH([harmonized, ga_site], training=True)
+                
+                # Site discriminator: should distinguish real site images from anything
+                disc_real_site = disc_site([real_site, ga_site], training=True)
+                disc_fake_site = disc_site([harmonized, ga_site], training=True)
+                
+                # Generator loss: fool BCH discriminator
+                gen_loss = generator_loss(disc_fake_BCH)
+                
+                # Cycle consistency loss
+                cycle_loss = cycle_consistency_loss(real_site, cycle_site)
+                
+                # Identity loss
+                identity_loss_val = identity_loss(real_BCH, identity_BCH)
+                
+                # Discriminator losses
+                disc_BCH_loss = discriminator_loss(disc_real_BCH, disc_fake_BCH)
+                disc_site_loss = discriminator_loss(disc_real_site, disc_fake_site)
+                
+                # Accumulate
+                total_gen_loss += gen_loss + self.lambda_cycle * cycle_loss + self.lambda_identity * identity_loss_val
+                total_disc_BCH_loss += disc_BCH_loss
+                total_disc_site_losses[site_name] = disc_site_loss
+                total_cycle_loss += cycle_loss
+                total_identity_loss += identity_loss_val
             
-            disc_real_B = self.disc_B([real_B, ga_B], training=True)
-            disc_fake_B = self.disc_B([fake_B, ga_A], training=True)
-            
-            # Generator losses
-            gen_A2B_loss = generator_loss(disc_fake_B)
-            gen_B2A_loss = generator_loss(disc_fake_A)
-            
-            # Cycle consistency losses
-            cycle_loss_A = cycle_consistency_loss(real_A, cycled_A)
-            cycle_loss_B = cycle_consistency_loss(real_B, cycled_B)
-            total_cycle_loss = cycle_loss_A + cycle_loss_B
-            
-            # Identity losses
-            identity_loss_A = identity_loss(real_A, same_A)
-            identity_loss_B = identity_loss(real_B, same_B)
-            total_identity_loss = identity_loss_A + identity_loss_B
-            
-            # Total generator loss
-            total_gen_A2B_loss = (gen_A2B_loss + 
-                                  self.lambda_cycle * total_cycle_loss +
-                                  self.lambda_identity * total_identity_loss)
-            total_gen_B2A_loss = (gen_B2A_loss + 
-                                  self.lambda_cycle * total_cycle_loss +
-                                  self.lambda_identity * total_identity_loss)
-            
-            # Discriminator losses
-            disc_A_loss = discriminator_loss(disc_real_A, disc_fake_A)
-            disc_B_loss = discriminator_loss(disc_real_B, disc_fake_B)
+            # Average losses across sites
+            n_sites = len([s for s in self.target_sites if s in site_batches])
+            if n_sites > 0:
+                total_gen_loss /= n_sites
+                total_disc_BCH_loss /= n_sites
+                total_cycle_loss /= n_sites
+                total_identity_loss /= n_sites
         
-        # Calculate gradients for generators
-        gen_A2B_gradients = tape.gradient(
-            total_gen_A2B_loss, self.gen_A2B.trainable_variables
-        )
-        gen_B2A_gradients = tape.gradient(
-            total_gen_B2A_loss, self.gen_B2A.trainable_variables
+        # Calculate gradients for generator
+        gen_gradients = tape.gradient(
+            total_gen_loss, self.gen_harmonize.trainable_variables
         )
         
-        # Calculate gradients for discriminators
-        disc_A_gradients = tape.gradient(
-            disc_A_loss, self.disc_A.trainable_variables
-        )
-        disc_B_gradients = tape.gradient(
-            disc_B_loss, self.disc_B.trainable_variables
+        # Calculate gradients for BCH discriminator
+        disc_BCH_gradients = tape.gradient(
+            total_disc_BCH_loss, self.disc_BCH.trainable_variables
         )
         
-        # Apply gradients to generators
+        # Calculate gradients for each site discriminator
+        disc_site_gradients = {}
+        for site_name, disc in self.disc_sites.items():
+            if site_name in total_disc_site_losses:
+                disc_site_gradients[site_name] = tape.gradient(
+                    total_disc_site_losses[site_name], disc.trainable_variables
+                )
+        
+        # Apply gradients to generator
         self.gen_optimizer.apply_gradients(
-            zip(gen_A2B_gradients, self.gen_A2B.trainable_variables)
-        )
-        self.gen_optimizer.apply_gradients(
-            zip(gen_B2A_gradients, self.gen_B2A.trainable_variables)
+            zip(gen_gradients, self.gen_harmonize.trainable_variables)
         )
         
-        # Apply gradients to discriminators
+        # Apply gradients to BCH discriminator
         self.disc_optimizer.apply_gradients(
-            zip(disc_A_gradients, self.disc_A.trainable_variables)
+            zip(disc_BCH_gradients, self.disc_BCH.trainable_variables)
         )
-        self.disc_optimizer.apply_gradients(
-            zip(disc_B_gradients, self.disc_B.trainable_variables)
-        )
+        
+        # Apply gradients to site discriminators
+        for site_name, gradients in disc_site_gradients.items():
+            self.disc_optimizer.apply_gradients(
+                zip(gradients, self.disc_sites[site_name].trainable_variables)
+            )
         
         del tape
         
-        return {
-            'gen_A2B_loss': total_gen_A2B_loss.numpy(),
-            'gen_B2A_loss': total_gen_B2A_loss.numpy(),
-            'disc_A_loss': disc_A_loss.numpy(),
-            'disc_B_loss': disc_B_loss.numpy(),
+        # Return losses
+        losses = {
+            'gen_loss': total_gen_loss.numpy(),
+            'disc_BCH_loss': total_disc_BCH_loss.numpy(),
             'cycle_loss': total_cycle_loss.numpy(),
             'identity_loss': total_identity_loss.numpy()
         }
+        
+        # Add individual site discriminator losses
+        for site_name, loss in total_disc_site_losses.items():
+            losses[f'disc_{site_name}_loss'] = loss.numpy()
+        
+        return losses
 
 
 # ============================================================================
@@ -469,7 +527,7 @@ def create_tf_dataset(images, ga, batch_size, shuffle=True, augment=True):
 
 
 def train(args):
-    """Main training function"""
+    """Main training function with multi-site discriminators"""
     
     # Configure GPU
     configure_gpu(args.gpu, memory_growth=True)
@@ -483,11 +541,6 @@ def train(args):
     result_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"\nOutput directories:")
-    print(f"  Weights: {weight_dir}")
-    print(f"  Results: {result_dir}")
-    print(f"  Logs: {log_dir}")
-    
     # Load data
     print("\n" + "="*80)
     print("LOADING DATA")
@@ -496,45 +549,52 @@ def train(args):
     train_images, train_ga, train_sex, train_site = load_preprocessed_data(
         args.train_data
     )
-    val_images, val_ga, val_sex, val_site = load_preprocessed_data(
-        args.val_data
-    )
     
-    # Check for NaN values in training data
-    print(f"\nChecking for NaN values in training data:")
-    print(f"  Images: {np.isnan(train_images).sum()} NaN values")
-    print(f"  GA: {np.isnan(train_ga).sum()} NaN values out of {len(train_ga)}")
-    print(f"  GA valid range: {np.nanmin(train_ga):.1f} - {np.nanmax(train_ga):.1f} weeks")
-    
-    # Replace NaN GA values with median
+    # Check and fix NaN values
     if np.isnan(train_ga).any():
-        print(f"  Replacing {np.isnan(train_ga).sum()} NaN GA values with median")
+        print(f"Replacing {np.isnan(train_ga).sum()} NaN GA values with median")
         train_ga_median = np.nanmedian(train_ga)
         train_ga = np.where(np.isnan(train_ga), train_ga_median, train_ga)
-        print(f"  New GA range: {train_ga.min():.1f} - {train_ga.max():.1f} weeks")
     
     # Create site datasets
     train_site_data, ref_site = create_site_datasets(
         train_images, train_ga, train_sex, train_site, args.reference_site
     )
-    val_site_data, _ = create_site_datasets(
-        val_images, val_ga, val_sex, val_site, args.reference_site
-    )
     
-    print(f"\nUsing {ref_site} as reference site")
+    # Get target sites (all sites except reference)
+    target_sites = [s for s in train_site_data.keys() if s != ref_site]
     
-    # Build model
+    print(f"\nReference site: {ref_site}")
+    print(f"Target sites: {target_sites}")
+    
+    # Build model with multi-site discriminators
     print("\n" + "="*80)
     print("BUILDING MODEL")
     print("="*80)
     
-    cyclegan = CycleGAN2D(img_shape=(138, 176, 1), ga_embedding_dim=args.ga_embedding_dim)
+    cyclegan = CycleGAN2D_MultiSite(
+        img_shape=(138, 176, 1), 
+        ga_embedding_dim=args.ga_embedding_dim,
+        target_sites=target_sites
+    )
     cyclegan.compile(lr=args.lr, beta_1=args.beta_1)
     
-    print(f"\nGenerator A2B parameters: {cyclegan.gen_A2B.count_params():,}")
-    print(f"Generator B2A parameters: {cyclegan.gen_B2A.count_params():,}")
-    print(f"Discriminator A parameters: {cyclegan.disc_A.count_params():,}")
-    print(f"Discriminator B parameters: {cyclegan.disc_B.count_params():,}")
+    # Create TF datasets for each site
+    print("\n" + "="*80)
+    print("CREATING DATASETS")
+    print("="*80)
+    
+    site_datasets = {}
+    for site_name, site_data in train_site_data.items():
+        dataset = create_tf_dataset(
+            site_data['images'], 
+            site_data['ga'],
+            args.batch_size,
+            shuffle=True,
+            augment=True
+        )
+        site_datasets[site_name] = dataset
+        print(f"  {site_name}: {site_data['n_slices']} slices")
     
     # Training loop
     print("\n" + "="*80)
@@ -545,43 +605,15 @@ def train(args):
     print(f"Learning rate: {args.lr}")
     print("="*80)
     
-    # Create datasets for reference site vs other sites
-    ref_data = train_site_data[ref_site]
-    
-    # For simplicity, combine all non-reference sites
-    other_images = []
-    other_ga = []
-    for site_name, site_data in train_site_data.items():
-        if site_name != ref_site:
-            other_images.append(site_data['images'])
-            other_ga.append(site_data['ga'])
-    
-    other_images = np.concatenate(other_images, axis=0)
-    other_ga = np.concatenate(other_ga, axis=0)
-    
-    print(f"\nTraining split:")
-    print(f"  Reference ({ref_site}): {len(ref_data['images'])} slices")
-    print(f"  Other sites: {len(other_images)} slices")
-    
-    # Create TF datasets
-    ref_dataset = create_tf_dataset(
-        ref_data['images'], ref_data['ga'], 
-        args.batch_size, shuffle=True, augment=True
-    )
-    other_dataset = create_tf_dataset(
-        other_images, other_ga,
-        args.batch_size, shuffle=True, augment=True
-    )
-    
     # Training history
     history = {
-        'gen_A2B_loss': [],
-        'gen_B2A_loss': [],
-        'disc_A_loss': [],
-        'disc_B_loss': [],
+        'gen_loss': [],
+        'disc_BCH_loss': [],
         'cycle_loss': [],
         'identity_loss': []
     }
+    for site in target_sites:
+        history[f'disc_{site}_loss'] = []
     
     # Training loop
     for epoch in range(args.epochs):
@@ -589,15 +621,14 @@ def train(args):
         
         epoch_losses = {k: [] for k in history.keys()}
         
-        # Create iterators
-        ref_iter = iter(ref_dataset)
-        other_iter = iter(other_dataset)
+        # Create iterators for each site
+        site_iters = {name: iter(dataset) for name, dataset in site_datasets.items()}
         
-        # Calculate steps per epoch (use minimum of both datasets)
-        steps_per_epoch = min(
-            len(ref_data['images']) // args.batch_size,
-            len(other_images) // args.batch_size
-        )
+        # Calculate steps per epoch (minimum across all sites)
+        steps_per_epoch = min([
+            len(train_site_data[s]['images']) // args.batch_size 
+            for s in train_site_data.keys()
+        ])
         
         # Progress bar
         from tqdm import tqdm
@@ -605,91 +636,90 @@ def train(args):
         
         # Iterate over batches
         for step in pbar:
+            # Get batch from each site
+            site_batches = {}
+            
+            for site_name, site_iter in site_iters.items():
+                try:
+                    images, ga = next(site_iter)
+                    
+                    # Ensure GA has correct shape
+                    if len(ga.shape) == 1:
+                        ga = tf.expand_dims(ga, axis=-1)
+                    
+                    site_batches[site_name] = (images, ga)
+                    
+                except StopIteration:
+                    # Reset iterator
+                    site_iters[site_name] = iter(site_datasets[site_name])
+                    images, ga = next(site_iters[site_name])
+                    if len(ga.shape) == 1:
+                        ga = tf.expand_dims(ga, axis=-1)
+                    site_batches[site_name] = (images, ga)
+            
+            # Train step with all site batches
             try:
-                real_A, ga_A = next(ref_iter)
-                real_B, ga_B = next(other_iter)
-            except StopIteration:
-                # Reset iterators if exhausted
-                ref_iter = iter(ref_dataset)
-                other_iter = iter(other_dataset)
-                real_A, ga_A = next(ref_iter)
-                real_B, ga_B = next(other_iter)
-            
-            # Ensure GA has correct shape [batch_size, 1]
-            if len(ga_A.shape) == 1:
-                ga_A = tf.expand_dims(ga_A, axis=-1)
-            if len(ga_B.shape) == 1:
-                ga_B = tf.expand_dims(ga_B, axis=-1)
-            
-            # Ensure images have correct shape [batch_size, 138, 176, 1]
-            if real_A.shape[1:] != (138, 176, 1):
-                print(f"Warning: real_A has unexpected shape {real_A.shape}")
-                continue
-            if real_B.shape[1:] != (138, 176, 1):
-                print(f"Warning: real_B has unexpected shape {real_B.shape}")
-                continue
-            
-            try:
-                losses = cyclegan.train_step(real_A, real_B, ga_A, ga_B)
+                losses = cyclegan.train_step(site_batches)
                 
-                # Check for NaN losses
+                # Check for NaN
                 if any(np.isnan(v) for v in losses.values()):
-                    print(f"\nWarning: NaN detected in losses at step {step}")
-                    print(f"  real_A: min={tf.reduce_min(real_A):.3f}, max={tf.reduce_max(real_A):.3f}")
-                    print(f"  real_B: min={tf.reduce_min(real_B):.3f}, max={tf.reduce_max(real_B):.3f}")
-                    print(f"  ga_A: {ga_A[:3].numpy().flatten()}")
-                    print(f"  ga_B: {ga_B[:3].numpy().flatten()}")
+                    print(f"\nWarning: NaN detected at step {step}")
                     continue
                 
+                # Accumulate losses
                 for k, v in losses.items():
-                    epoch_losses[k].append(v)
+                    if k in epoch_losses:
+                        epoch_losses[k].append(v)
                 
                 # Update progress bar
                 pbar.set_postfix({
-                    'G_A2B': f"{losses['gen_A2B_loss']:.3f}",
-                    'G_B2A': f"{losses['gen_B2A_loss']:.3f}",
-                    'D_A': f"{losses['disc_A_loss']:.3f}",
-                    'D_B': f"{losses['disc_B_loss']:.3f}"
+                    'G': f"{losses['gen_loss']:.3f}",
+                    'D_BCH': f"{losses['disc_BCH_loss']:.3f}",
+                    'Cycle': f"{losses['cycle_loss']:.3f}"
                 })
+                
             except Exception as e:
                 print(f"\nError at step {step}: {e}")
-                print(f"  real_A shape: {real_A.shape}")
-                print(f"  real_B shape: {real_B.shape}")
-                print(f"  ga_A shape: {ga_A.shape}")
-                print(f"  ga_B shape: {ga_B.shape}")
                 continue
         
-        # Average losses (skip if no valid losses)
-        if not epoch_losses['gen_A2B_loss']:
-            print(f"Warning: No valid losses for epoch {epoch+1}, skipping...")
+        # Average losses
+        if not epoch_losses['gen_loss']:
+            print(f"Warning: No valid losses for epoch {epoch+1}")
             continue
-            
+        
         for k in history.keys():
-            avg_loss = np.mean(epoch_losses[k])
-            history[k].append(avg_loss)
+            if epoch_losses[k]:
+                avg_loss = np.mean(epoch_losses[k])
+                history[k].append(avg_loss)
         
         # Print epoch summary
-        print(f"  Gen A2B: {history['gen_A2B_loss'][-1]:.4f} | "
-              f"Gen B2A: {history['gen_B2A_loss'][-1]:.4f} | "
-              f"Disc A: {history['disc_A_loss'][-1]:.4f} | "
-              f"Disc B: {history['disc_B_loss'][-1]:.4f} | "
+        print(f"  Gen: {history['gen_loss'][-1]:.4f} | "
+              f"Disc BCH: {history['disc_BCH_loss'][-1]:.4f} | "
               f"Cycle: {history['cycle_loss'][-1]:.4f} | "
               f"Identity: {history['identity_loss'][-1]:.4f}")
         
         # Save checkpoints
         if (epoch + 1) % args.save_freq == 0:
             print(f"  Saving checkpoint at epoch {epoch+1}")
-            cyclegan.gen_A2B.save_weights(weight_dir / f'gen_A2B_epoch_{epoch+1}.weights.h5')
-            cyclegan.gen_B2A.save_weights(weight_dir / f'gen_B2A_epoch_{epoch+1}.weights.h5')
-            cyclegan.disc_A.save_weights(weight_dir / f'disc_A_epoch_{epoch+1}.weights.h5')
-            cyclegan.disc_B.save_weights(weight_dir / f'disc_B_epoch_{epoch+1}.weights.h5')
+            cyclegan.gen_harmonize.save_weights(
+                weight_dir / f'gen_harmonize_epoch_{epoch+1}.weights.h5'
+            )
+            cyclegan.disc_BCH.save_weights(
+                weight_dir / f'disc_BCH_epoch_{epoch+1}.weights.h5'
+            )
+            for site_name, disc in cyclegan.disc_sites.items():
+                safe_name = site_name.replace('_', '').replace('-', '')[:20]
+                disc.save_weights(
+                    weight_dir / f'disc_{safe_name}_epoch_{epoch+1}.weights.h5'
+                )
     
     # Save final models
     print("\nSaving final models...")
-    cyclegan.gen_A2B.save_weights(weight_dir / 'gen_A2B_final.weights.h5')
-    cyclegan.gen_B2A.save_weights(weight_dir / 'gen_B2A_final.weights.h5')
-    cyclegan.disc_A.save_weights(weight_dir / 'disc_A_final.weights.h5')
-    cyclegan.disc_B.save_weights(weight_dir / 'disc_B_final.weights.h5')
+    cyclegan.gen_harmonize.save_weights(weight_dir / 'gen_harmonize_final.weights.h5')
+    cyclegan.disc_BCH.save_weights(weight_dir / 'disc_BCH_final.weights.h5')
+    for site_name, disc in cyclegan.disc_sites.items():
+        safe_name = site_name.replace('_', '').replace('-', '')[:20]
+        disc.save_weights(weight_dir / f'disc_{safe_name}_final.weights.h5')
     
     # Save history
     history_df = pd.DataFrame(history)
