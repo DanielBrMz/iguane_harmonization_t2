@@ -153,13 +153,13 @@ def create_site_datasets(images, ga, sex, site, reference_site='BCH_CHD'):
 
 
 # ============================================================================
-# NETWORK ARCHITECTURES (Lighter for stability)
+# NETWORK ARCHITECTURES
 # ============================================================================
 
 def build_2d_generator(input_shape=(138, 176, 1), ga_embedding_dim=16, name='generator'):
     """
-    Lighter 2D U-Net Generator with Gestational Age Conditioning
-    Reduced capacity to prevent discriminator collapse
+    2D U-Net Generator with GA Conditioning
+    Architecture: 32→64→128→256
     """
     
     img_input = layers.Input(shape=input_shape, name='image_input')
@@ -168,36 +168,36 @@ def build_2d_generator(input_shape=(138, 176, 1), ga_embedding_dim=16, name='gen
     # GA embedding
     ga_embedding = layers.Dense(ga_embedding_dim, activation='relu')(ga_input)
     ga_embedding = layers.Dense(ga_embedding_dim, activation='relu')(ga_embedding)
-    
-    # Encoder (even lighter: 16, 32, 64, 128)
+
+    # Encoder: 32→64→128→256
     # Block 1
-    x = layers.Conv2D(16, 3, padding='same')(img_input)
+    x = layers.Conv2D(32, 3, padding='same')(img_input)
     x = layers.LeakyReLU(0.2)(x)
-    x = layers.Conv2D(16, 3, padding='same')(x)
+    x = layers.Conv2D(32, 3, padding='same')(x)
     x = layers.LeakyReLU(0.2)(x)
     skip1 = x
     x = layers.MaxPooling2D(2)(x)
     
     # Block 2
-    x = layers.Conv2D(32, 3, padding='same')(x)
+    x = layers.Conv2D(64, 3, padding='same')(x)
     x = layers.LeakyReLU(0.2)(x)
-    x = layers.Conv2D(32, 3, padding='same')(x)
+    x = layers.Conv2D(64, 3, padding='same')(x)
     x = layers.LeakyReLU(0.2)(x)
     skip2 = x
     x = layers.MaxPooling2D(2)(x)
     
-    # Block 3
-    x = layers.Conv2D(64, 3, padding='same')(x)
+    # Block 3 - CHANGED: 64→128 filters
+    x = layers.Conv2D(128, 3, padding='same')(x)
     x = layers.LeakyReLU(0.2)(x)
-    x = layers.Conv2D(64, 3, padding='same')(x)
+    x = layers.Conv2D(128, 3, padding='same')(x)
     x = layers.LeakyReLU(0.2)(x)
     skip3 = x
     x = layers.MaxPooling2D(2)(x)
     
     # Bottleneck
-    x = layers.Conv2D(128, 3, padding='same')(x)
+    x = layers.Conv2D(256, 3, padding='same')(x)
     x = layers.LeakyReLU(0.2)(x)
-    x = layers.Conv2D(128, 3, padding='same')(x)
+    x = layers.Conv2D(256, 3, padding='same')(x)
     x = layers.LeakyReLU(0.2)(x)
     
     # Inject GA
@@ -205,35 +205,34 @@ def build_2d_generator(input_shape=(138, 176, 1), ga_embedding_dim=16, name='gen
     ga_spatial = layers.Reshape((x.shape[1], x.shape[2], ga_embedding_dim))(ga_spatial)
     x = layers.Concatenate()([x, ga_spatial])
     
-    # Decoder
     # Block 5
     x = layers.UpSampling2D(2, interpolation='bilinear')(x)
     if x.shape[1] != skip3.shape[1] or x.shape[2] != skip3.shape[2]:
         x = layers.Resizing(skip3.shape[1], skip3.shape[2])(x)
     x = layers.Concatenate()([x, skip3])
-    x = layers.Conv2D(64, 3, padding='same')(x)
+    x = layers.Conv2D(128, 3, padding='same')(x)
     x = layers.LeakyReLU(0.2)(x)
-    x = layers.Conv2D(64, 3, padding='same')(x)
+    x = layers.Conv2D(128, 3, padding='same')(x)
     x = layers.LeakyReLU(0.2)(x)
     
-    # Block 6
+    # Block 6 - 128→64 filters
     x = layers.UpSampling2D(2, interpolation='bilinear')(x)
     if x.shape[1] != skip2.shape[1] or x.shape[2] != skip2.shape[2]:
         x = layers.Resizing(skip2.shape[1], skip2.shape[2])(x)
     x = layers.Concatenate()([x, skip2])
-    x = layers.Conv2D(32, 3, padding='same')(x)
+    x = layers.Conv2D(64, 3, padding='same')(x)
     x = layers.LeakyReLU(0.2)(x)
-    x = layers.Conv2D(32, 3, padding='same')(x)
+    x = layers.Conv2D(64, 3, padding='same')(x)
     x = layers.LeakyReLU(0.2)(x)
     
-    # Block 7
+    # Block 7 - 64→32 filters
     x = layers.UpSampling2D(2, interpolation='bilinear')(x)
     if x.shape[1] != skip1.shape[1] or x.shape[2] != skip1.shape[2]:
         x = layers.Resizing(skip1.shape[1], skip1.shape[2])(x)
     x = layers.Concatenate()([x, skip1])
-    x = layers.Conv2D(16, 3, padding='same')(x)
+    x = layers.Conv2D(32, 3, padding='same')(x)
     x = layers.LeakyReLU(0.2)(x)
-    x = layers.Conv2D(16, 3, padding='same')(x)
+    x = layers.Conv2D(32, 3, padding='same')(x)
     x = layers.LeakyReLU(0.2)(x)
     
     # Final
