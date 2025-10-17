@@ -1,6 +1,40 @@
 """
 2D CycleGAN for Fetal Brain MRI Harmonization
-With proper two-generator architecture and safety checks
+With proper two-generator architecture and multi-GPU support
+
+MULTI-GPU STRATEGIES:
+=====================
+
+1. MODEL PARALLELISM (--multi_gpu_strategy model_parallel) [RECOMMENDED]
+   - GPU 0: Generators (gen_site2BCH + gen_BCH2site)
+   - GPU 1: BCH Discriminator
+   - GPU 2+: Site Discriminators (distributed)
+   - Pros: Can fit larger models, memory efficient per GPU
+   - Cons: Some communication overhead between GPUs
+   - Best for: Complex models that don't fit on single GPU
+
+2. DATA PARALLELISM (--multi_gpu_strategy data_parallel)
+   - All models replicated on each GPU
+   - Batch split across GPUs
+   - Gradients averaged across replicas
+   - Pros: Faster training with larger effective batch size
+   - Cons: Each GPU needs full model memory
+   - Best for: When model fits on single GPU, want faster training
+
+3. SINGLE GPU (--multi_gpu_strategy single)
+   - All models on GPU 0
+   - Use when: debugging, small datasets, or only 1 GPU available
+
+USAGE EXAMPLES:
+===============
+# Model parallelism across 3 GPUs (recommended for your setup):
+python train_fetal_2d_cyclegan.py --gpu 0,1,2 --multi_gpu_strategy model_parallel --batch_size 16
+
+# Data parallelism across 3 GPUs (if model fits on single GPU):
+python train_fetal_2d_cyclegan.py --gpu 0,1,2 --multi_gpu_strategy data_parallel --batch_size 48
+
+# Single GPU training:
+python train_fetal_2d_cyclegan.py --gpu 0 --multi_gpu_strategy single --batch_size 8
 """
 
 import os
@@ -20,7 +54,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras import backend as K
 
 print("="*80)
-print("FIXED FETAL BRAIN 2D CYCLEGAN - MULTI-DISCRIMINATOR")
+print("FIXED FETAL BRAIN 2D CYCLEGAN - MULTI-GPU SUPPORT")
 print("="*80)
 print(f"TensorFlow version: {tf.__version__}")
 print(f"GPUs available: {len(tf.config.list_physical_devices('GPU'))}")
@@ -31,10 +65,29 @@ print("="*80)
 # GPU CONFIGURATION
 # ============================================================================
 
-def configure_gpu(gpu_id='0', memory_growth=True):
-    """Configure GPU settings"""
+def print_gpu_usage():
+    """Print current GPU memory usage"""
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        print("\n  GPU Memory Usage:")
+        for i, gpu in enumerate(gpus):
+            try:
+                # Get memory info
+                memory_info = tf.config.experimental.get_memory_info(f'GPU:{i}')
+                current_mb = memory_info['current'] / 1024**2
+                peak_mb = memory_info['peak'] / 1024**2
+                print(f"    GPU {i}: Current={current_mb:.0f}MB, Peak={peak_mb:.0f}MB")
+            except Exception as e:
+                print(f"    GPU {i}: Unable to get memory info")
+
+
+def configure_gpu(gpu_ids='0,1,2', memory_growth=True):
+    """Configure multiple GPU settings"""
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
+    os.environ["CUDA_VISIBLE_DEVICES"] = gpu_ids
+    
+    # Clear any existing TF sessions
+    tf.keras.backend.clear_session()
     
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
@@ -43,8 +96,11 @@ def configure_gpu(gpu_id='0', memory_growth=True):
                 if memory_growth:
                     tf.config.experimental.set_memory_growth(gpu, True)
             print(f"✓ Configured {len(gpus)} GPU(s) with memory growth: {memory_growth}")
+            print(f"✓ Available GPUs: {[gpu.name for gpu in gpus]}")
         except RuntimeError as e:
             print(f"GPU configuration error: {e}")
+    
+    return gpus
 
 
 # ============================================================================
@@ -88,7 +144,7 @@ def create_site_datasets(images, ga, sex, site, reference_site='BCH_CHD'):
         print(f"  {s}: {site_data[s]['n_slices']} slices")
     
     if reference_site not in site_data:
-        print(f" Reference site {reference_site} not found!")
+        print(f"  Reference site {reference_site} not found!")
         print(f"  Available sites: {list(site_data.keys())}")
         reference_site = list(site_data.keys())[0]
         print(f"  Using {reference_site} as reference instead")
@@ -275,196 +331,277 @@ def generator_loss(fake_output):
 
 
 # ============================================================================
-# CYCLEGAN MODEL - FIXED with TWO GENERATORS
+# CYCLEGAN MODEL - MULTI-GPU SUPPORT
 # ============================================================================
 
 class CycleGAN2D_MultiSite:
     """
-    CORRECT 2D CycleGAN with TWO generators and multiple discriminators
+    2D CycleGAN with ONE forward generator and N backward generators
     """
     
-    def __init__(self, img_shape=(138, 176, 1), ga_embedding_dim=16, target_sites=None):
+    def __init__(self, img_shape=(138, 176, 1), ga_embedding_dim=16, target_sites=None, 
+                 use_multi_gpu=True):
         self.img_shape = img_shape
         self.ga_embedding_dim = ga_embedding_dim
         self.target_sites = target_sites or []
+        self.use_multi_gpu = use_multi_gpu
+        
+        self.gpus = tf.config.list_physical_devices('GPU')
+        self.n_gpus = len(self.gpus)
         
         print(f"\nBuilding CORRECTED CycleGAN:")
-        print(f"  - 2 generators (forward & backward)")
+        print(f"  - 1 forward generator (site→BCH)")
+        print(f"  - {len(self.target_sites)} backward generators (BCH→site, one per site)")
         print(f"  - {len(self.target_sites) + 1} discriminators (BCH + {len(self.target_sites)} sites)")
+        print(f"  - Using {self.n_gpus} GPUs" if self.use_multi_gpu and self.n_gpus > 1 else "  - Using single GPU")
         
-        # Build TWO generators (THIS IS THE FIX!)
-        self.gen_site2BCH = build_2d_generator(img_shape, ga_embedding_dim, name='gen_site2BCH')
-        self.gen_BCH2site = build_2d_generator(img_shape, ga_embedding_dim, name='gen_BCH2site')
+        # GPU assignment
+        if self.use_multi_gpu and self.n_gpus >= 2:
+            self.gpu_assignments = {
+                'generators': '/GPU:0',
+                'disc_BCH': '/GPU:1' if self.n_gpus >= 2 else '/GPU:0',
+                'disc_sites': '/GPU:2' if self.n_gpus >= 3 else '/GPU:1' if self.n_gpus >= 2 else '/GPU:0'
+            }
+            print(f"\n  GPU Assignment:")
+            print(f"    Generators → {self.gpu_assignments['generators']}")
+            print(f"    Disc BCH → {self.gpu_assignments['disc_BCH']}")
+            print(f"    Disc Sites → {self.gpu_assignments['disc_sites']}")
+        else:
+            self.gpu_assignments = {
+                'generators': '/GPU:0',
+                'disc_BCH': '/GPU:0',
+                'disc_sites': '/GPU:0'
+            }
         
-        # Build discriminators
-        self.disc_BCH = build_2d_discriminator(img_shape, ga_embedding_dim, name='disc_BCH')
+        # Build ONE forward generator on GPU 0
+        with tf.device(self.gpu_assignments['generators']):
+            self.gen_site2BCH = build_2d_generator(img_shape, ga_embedding_dim, name='gen_site2BCH')
         
-        self.disc_sites = {}
+        # Build N backward generators (one per site) on GPU 0
+        self.gen_BCH2site = {}
         for site in self.target_sites:
-            site_name = site.replace('_', '').replace('-', '')[:20]
-            self.disc_sites[site] = build_2d_discriminator(
-                img_shape, ga_embedding_dim, name=f'disc_{site_name}'
-            )
+            with tf.device(self.gpu_assignments['generators']):
+                site_name = site.replace('_', '').replace('-', '')[:20]
+                self.gen_BCH2site[site] = build_2d_generator(
+                    img_shape, ga_embedding_dim, name=f'gen_BCH2{site_name}'
+                )
+                print(f"    Backward gen BCH→{site} created")
         
-        # Loss weights (REDUCED for stability)
-        self.lambda_cycle = 5.0  # Reduced from 10
-        self.lambda_identity = 2.5  # Reduced from 5
+        # Build BCH discriminator on GPU 1
+        with tf.device(self.gpu_assignments['disc_BCH']):
+            self.disc_BCH = build_2d_discriminator(img_shape, ga_embedding_dim, name='disc_BCH')
         
-        # Safety tracking
+        # Build site discriminators on GPU 2
+        self.disc_sites = {}
+        for i, site in enumerate(self.target_sites):
+            if self.use_multi_gpu and self.n_gpus >= 3:
+                gpu_id = i % self.n_gpus
+                device = f'/GPU:{gpu_id}'
+            else:
+                device = self.gpu_assignments['disc_sites']
+            
+            with tf.device(device):
+                site_name = site.replace('_', '').replace('-', '')[:20]
+                self.disc_sites[site] = build_2d_discriminator(
+                    img_shape, ga_embedding_dim, name=f'disc_{site_name}'
+                )
+                if self.use_multi_gpu:
+                    print(f"    Disc {site} → {device}")
+        
+        self.lambda_cycle = 5.0
+        self.lambda_identity = 2.5
         self.collapse_counter = 0
         
-    def compile(self, lr=0.0001, beta_1=0.5):  # LOWER learning rate
+    def compile(self, lr=0.0001, beta_1=0.5):
         """Compile model with optimizers"""
         self.gen_optimizer = Adam(learning_rate=lr, beta_1=beta_1)
         self.disc_optimizer = Adam(learning_rate=lr, beta_1=beta_1)
         
-        # Build optimizers
-        self.gen_optimizer.build(
-            self.gen_site2BCH.trainable_variables + self.gen_BCH2site.trainable_variables
-        )
+        # Build generator optimizer with ALL generator variables
+        all_gen_vars = self.gen_site2BCH.trainable_variables
+        for gen in self.gen_BCH2site.values():
+            all_gen_vars += gen.trainable_variables
+        self.gen_optimizer.build(all_gen_vars)
         
+        # Build discriminator optimizer
         all_disc_vars = self.disc_BCH.trainable_variables
         for disc in self.disc_sites.values():
             all_disc_vars += disc.trainable_variables
         self.disc_optimizer.build(all_disc_vars)
         
-        print("✓ Model compiled")
+        print("Model compiled")
         print(f"  Gen site→BCH parameters: {self.gen_site2BCH.count_params():,}")
-        print(f"  Gen BCH→site parameters: {self.gen_BCH2site.count_params():,}")
+        print(f"  Gen BCH→site parameters: {list(self.gen_BCH2site.values())[0].count_params():,} × {len(self.target_sites)}")
         print(f"  Disc BCH parameters: {self.disc_BCH.count_params():,}")
-        print(f"  Disc per-site parameters: {list(self.disc_sites.values())[0].count_params():,} × {len(self.target_sites)}")
+        if self.target_sites:
+            print(f"  Disc per-site parameters: {list(self.disc_sites.values())[0].count_params():,} × {len(self.target_sites)}")
     
     def train_step(self, site_batches):
-        """
-        CORRECTED training step with proper cycle consistency
-        """
+        """Multi-GPU training step with N backward generators"""
         
-        with tf.GradientTape(persistent=True) as tape:
+        accumulated_gen_grads = None
+        accumulated_disc_BCH_grads = None
+        accumulated_disc_site_grads = {site: None for site in self.target_sites}
+        
+        total_gen_loss = 0.0
+        total_disc_BCH_loss = 0.0
+        total_disc_site_losses = {}
+        total_cycle_loss = 0.0
+        total_identity_loss = 0.0
+        
+        for site_name in self.target_sites:
+            if site_name not in site_batches:
+                continue
             
+            real_site, ga_site = site_batches[site_name]
             real_BCH, ga_BCH = site_batches['BCH_CHD']
+            disc_site = self.disc_sites[site_name]
+            gen_BCH2site_i = self.gen_BCH2site[site_name]  # Get specific backward generator
             
-            total_gen_loss = 0.0
-            total_disc_BCH_loss = 0.0
-            total_disc_site_losses = {}
-            total_cycle_loss = 0.0
-            total_identity_loss = 0.0
+            # GENERATOR UPDATE
+            with tf.device(self.gpu_assignments['generators']):
+                with tf.GradientTape() as gen_tape:
+                    # FORWARD CYCLE: Site → BCH → Site
+                    fake_BCH = self.gen_site2BCH([real_site, ga_site], training=True)
+                    cycled_site = gen_BCH2site_i([fake_BCH, ga_site], training=True)
+                    
+                    # BACKWARD CYCLE: BCH → Site → BCH
+                    fake_site = gen_BCH2site_i([real_BCH, ga_BCH], training=True)
+                    cycled_BCH = self.gen_site2BCH([fake_site, ga_BCH], training=True)
+                    
+                    # IDENTITY
+                    identity_BCH = gen_BCH2site_i([real_BCH, ga_BCH], training=True)
+                    identity_site = self.gen_site2BCH([real_site, ga_site], training=True)
+                    
+                    # Discriminator predictions
+                    disc_fake_BCH = self.disc_BCH([fake_BCH, ga_site], training=False)
+                    disc_fake_site = disc_site([fake_site, ga_BCH], training=False)
+                    
+                    # Generator losses
+                    gen_site2BCH_loss = generator_loss(disc_fake_BCH)
+                    gen_BCH2site_loss = generator_loss(disc_fake_site)
+                    
+                    # Cycle losses
+                    cycle_loss_forward = cycle_consistency_loss(real_site, cycled_site)
+                    cycle_loss_backward = cycle_consistency_loss(real_BCH, cycled_BCH)
+                    cycle_loss_total = cycle_loss_forward + cycle_loss_backward
+                    
+                    # Identity losses
+                    identity_loss_BCH = identity_loss(real_BCH, identity_BCH)
+                    identity_loss_site = identity_loss(real_site, identity_site)
+                    identity_loss_total = identity_loss_BCH + identity_loss_site
+                    
+                    # Total generator loss
+                    gen_loss = (gen_site2BCH_loss + gen_BCH2site_loss + 
+                               self.lambda_cycle * cycle_loss_total + 
+                               self.lambda_identity * identity_loss_total)
+                
+                # Generator gradients (for forward + specific backward generator)
+                gen_vars = self.gen_site2BCH.trainable_variables + gen_BCH2site_i.trainable_variables
+                gen_gradients = gen_tape.gradient(gen_loss, gen_vars)
+                gen_gradients, _ = tf.clip_by_global_norm(gen_gradients, 5.0)
+                
+                if accumulated_gen_grads is None:
+                    accumulated_gen_grads = gen_gradients
+                else:
+                    accumulated_gen_grads = [
+                        ag + g for ag, g in zip(accumulated_gen_grads, gen_gradients)
+                    ]
             
-            for site_name in self.target_sites:
-                if site_name not in site_batches:
-                    continue
+            # BCH DISCRIMINATOR UPDATE
+            with tf.device(self.gpu_assignments['disc_BCH']):
+                with tf.GradientTape() as disc_BCH_tape:
+                    disc_real_BCH = self.disc_BCH([real_BCH, ga_BCH], training=True)
+                    disc_fake_BCH_d = self.disc_BCH([fake_BCH, ga_site], training=True)
+                    disc_BCH_loss = discriminator_loss_smooth(disc_real_BCH, disc_fake_BCH_d)
                 
-                real_site, ga_site = site_batches[site_name]
-                disc_site = self.disc_sites[site_name]
+                disc_BCH_gradients = disc_BCH_tape.gradient(disc_BCH_loss, self.disc_BCH.trainable_variables)
+                disc_BCH_gradients, _ = tf.clip_by_global_norm(disc_BCH_gradients, 5.0)
                 
-                # FORWARD CYCLE: Site → BCH → Site (THIS IS THE FIX!)
-                fake_BCH = self.gen_site2BCH([real_site, ga_site], training=True)
-                cycled_site = self.gen_BCH2site([fake_BCH, ga_site], training=True)
-                
-                # BACKWARD CYCLE: BCH → Site → BCH (THIS IS THE FIX!)
-                fake_site = self.gen_BCH2site([real_BCH, ga_BCH], training=True)
-                cycled_BCH = self.gen_site2BCH([fake_site, ga_BCH], training=True)
-                
-                # IDENTITY: BCH through BCH→site should stay same (THIS IS THE FIX!)
-                identity_BCH = self.gen_BCH2site([real_BCH, ga_BCH], training=True)
-                # IDENTITY: Site through site→BCH should stay same
-                identity_site = self.gen_site2BCH([real_site, ga_site], training=True)
-                
-                # Discriminator predictions
-                disc_real_BCH = self.disc_BCH([real_BCH, ga_BCH], training=True)
-                disc_fake_BCH = self.disc_BCH([fake_BCH, ga_site], training=True)
-                
+                if accumulated_disc_BCH_grads is None:
+                    accumulated_disc_BCH_grads = disc_BCH_gradients
+                else:
+                    accumulated_disc_BCH_grads = [
+                        ag + g for ag, g in zip(accumulated_disc_BCH_grads, disc_BCH_gradients)
+                    ]
+            
+            # SITE DISCRIMINATOR UPDATE
+            with tf.GradientTape() as disc_site_tape:
                 disc_real_site = disc_site([real_site, ga_site], training=True)
-                disc_fake_site = disc_site([fake_site, ga_BCH], training=True)
-                
-                # Generator losses
-                gen_site2BCH_loss = generator_loss(disc_fake_BCH)
-                gen_BCH2site_loss = generator_loss(disc_fake_site)
-                
-                # Cycle losses (THIS IS THE FIX!)
-                cycle_loss_forward = cycle_consistency_loss(real_site, cycled_site)
-                cycle_loss_backward = cycle_consistency_loss(real_BCH, cycled_BCH)
-                cycle_loss_total = cycle_loss_forward + cycle_loss_backward
-                
-                # Identity losses (THIS IS THE FIX!)
-                identity_loss_BCH = identity_loss(real_BCH, identity_BCH)
-                identity_loss_site = identity_loss(real_site, identity_site)
-                identity_loss_total = identity_loss_BCH + identity_loss_site
-                
-                # Discriminator losses with label smoothing
-                disc_BCH_loss = discriminator_loss_smooth(disc_real_BCH, disc_fake_BCH)
-                disc_site_loss = discriminator_loss_smooth(disc_real_site, disc_fake_site)
-                
-                # Accumulate
-                total_gen_loss += (gen_site2BCH_loss + gen_BCH2site_loss + 
-                                  self.lambda_cycle * cycle_loss_total + 
-                                  self.lambda_identity * identity_loss_total)
-                total_disc_BCH_loss += disc_BCH_loss
-                total_disc_site_losses[site_name] = disc_site_loss
-                total_cycle_loss += cycle_loss_total
-                total_identity_loss += identity_loss_total
+                disc_fake_site_d = disc_site([fake_site, ga_BCH], training=True)
+                disc_site_loss = discriminator_loss_smooth(disc_real_site, disc_fake_site_d)
             
-            # Average
-            n_sites = len([s for s in self.target_sites if s in site_batches])
-            if n_sites > 0:
-                total_gen_loss /= n_sites
-                total_disc_BCH_loss /= n_sites
-                total_cycle_loss /= n_sites
-                total_identity_loss /= n_sites
+            disc_site_gradients = disc_site_tape.gradient(disc_site_loss, disc_site.trainable_variables)
+            disc_site_gradients, _ = tf.clip_by_global_norm(disc_site_gradients, 5.0)
+            
+            if accumulated_disc_site_grads[site_name] is None:
+                accumulated_disc_site_grads[site_name] = disc_site_gradients
+            else:
+                accumulated_disc_site_grads[site_name] = [
+                    ag + g for ag, g in zip(accumulated_disc_site_grads[site_name], disc_site_gradients)
+                ]
+            
+            # Accumulate losses
+            total_gen_loss += gen_loss.numpy()
+            total_disc_BCH_loss += disc_BCH_loss.numpy()
+            total_disc_site_losses[site_name] = disc_site_loss.numpy()
+            total_cycle_loss += cycle_loss_total.numpy()
+            total_identity_loss += identity_loss_total.numpy()
+            
+            # Clear references
+            del gen_tape, disc_BCH_tape, disc_site_tape
+            del fake_BCH, cycled_site, fake_site, cycled_BCH
+            del identity_BCH, identity_site
         
-        # Apply gradients
-        gen_gradients = tape.gradient(
-            total_gen_loss, 
-            self.gen_site2BCH.trainable_variables + self.gen_BCH2site.trainable_variables
-        )
-        
-        disc_BCH_gradients = tape.gradient(
-            total_disc_BCH_loss, self.disc_BCH.trainable_variables
-        )
-        
-        disc_site_gradients = {}
-        for site_name, disc in self.disc_sites.items():
-            if site_name in total_disc_site_losses:
-                disc_site_gradients[site_name] = tape.gradient(
-                    total_disc_site_losses[site_name], disc.trainable_variables
+        # Average and apply gradients
+        n_sites = len([s for s in self.target_sites if s in site_batches])
+        if n_sites > 0:
+            accumulated_gen_grads = [g / n_sites for g in accumulated_gen_grads]
+            accumulated_disc_BCH_grads = [g / n_sites for g in accumulated_disc_BCH_grads]
+            
+            # Apply generator gradients
+            with tf.device(self.gpu_assignments['generators']):
+                all_gen_vars = self.gen_site2BCH.trainable_variables
+                for gen in self.gen_BCH2site.values():
+                    all_gen_vars += gen.trainable_variables
+                self.gen_optimizer.apply_gradients(zip(accumulated_gen_grads, all_gen_vars))
+            
+            # Apply BCH discriminator gradients
+            with tf.device(self.gpu_assignments['disc_BCH']):
+                self.disc_optimizer.apply_gradients(
+                    zip(accumulated_disc_BCH_grads, self.disc_BCH.trainable_variables)
                 )
+            
+            # Apply site discriminator gradients
+            for site_name, gradients in accumulated_disc_site_grads.items():
+                if gradients is not None:
+                    gradients = [g / n_sites for g in gradients]
+                    self.disc_optimizer.apply_gradients(
+                        zip(gradients, self.disc_sites[site_name].trainable_variables)
+                    )
+            
+            # Average losses
+            total_gen_loss /= n_sites
+            total_disc_BCH_loss /= n_sites
+            total_cycle_loss /= n_sites
+            total_identity_loss /= n_sites
         
-        # SAFETY CHECK: Clip gradients to prevent explosion
-        gen_gradients, _ = tf.clip_by_global_norm(gen_gradients, 5.0)
-        disc_BCH_gradients, _ = tf.clip_by_global_norm(disc_BCH_gradients, 5.0)
-        
-        self.gen_optimizer.apply_gradients(
-            zip(gen_gradients, 
-                self.gen_site2BCH.trainable_variables + self.gen_BCH2site.trainable_variables)
-        )
-        
-        self.disc_optimizer.apply_gradients(
-            zip(disc_BCH_gradients, self.disc_BCH.trainable_variables)
-        )
-        
-        for site_name, gradients in disc_site_gradients.items():
-            gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
-            self.disc_optimizer.apply_gradients(
-                zip(gradients, self.disc_sites[site_name].trainable_variables)
-            )
-        
-        del tape
-        
-        # SAFETY CHECK: Detect collapse
+        # Collapse detection
         if total_disc_BCH_loss < 0.01:
             self.collapse_counter += 1
         else:
             self.collapse_counter = 0
         
         losses = {
-            'gen_loss': total_gen_loss.numpy(),
-            'disc_BCH_loss': total_disc_BCH_loss.numpy(),
-            'cycle_loss': total_cycle_loss.numpy(),
-            'identity_loss': total_identity_loss.numpy(),
+            'gen_loss': total_gen_loss,
+            'disc_BCH_loss': total_disc_BCH_loss,
+            'cycle_loss': total_cycle_loss,
+            'identity_loss': total_identity_loss,
             'collapse_warning': self.collapse_counter
         }
         
         for site_name, loss in total_disc_site_losses.items():
-            losses[f'disc_{site_name}_loss'] = loss.numpy()
+            losses[f'disc_{site_name}_loss'] = loss
         
         return losses
 
@@ -484,7 +621,7 @@ class DataAugmenter:
             image = tf.image.flip_left_right(image)
         if tf.random.uniform(()) > 0.5:
             image = tf.image.flip_up_down(image)
-        image = tf.image.random_brightness(image, max_delta=0.1)  # Reduced
+        image = tf.image.random_brightness(image, max_delta=0.1)
         image = tf.clip_by_value(image, 0.0, 1.0)
         return image, ga
 
@@ -510,9 +647,22 @@ def create_tf_dataset(images, ga, batch_size, shuffle=True, augment=True):
 # ============================================================================
 
 def train(args):
-    """Main training function with safety checks"""
+    """Main training function with multi-GPU support"""
     
-    configure_gpu(args.gpu, memory_growth=True)
+    gpus = configure_gpu(args.gpu, memory_growth=True)
+    use_multi_gpu = len(gpus) > 1 if gpus else False
+    
+    # Setup distribution strategy if using data parallelism
+    if args.multi_gpu_strategy == 'data_parallel' and use_multi_gpu:
+        print(f"\nUsing MirroredStrategy for data parallelism across {len(gpus)} GPUs")
+        strategy = tf.distribute.MirroredStrategy()
+        print(f"Number of devices in strategy: {strategy.num_replicas_in_sync}")
+    else:
+        strategy = None
+        if args.multi_gpu_strategy == 'model_parallel' and use_multi_gpu:
+            print(f"\nUsing model parallelism across {len(gpus)} GPUs")
+        else:
+            print(f"\nUsing single GPU training")
     
     weight_dir = Path(args.weight_dir)
     result_dir = Path(args.result_dir)
@@ -529,7 +679,7 @@ def train(args):
     train_images, train_ga, train_sex, train_site = load_preprocessed_data(args.train_data)
     
     if np.isnan(train_ga).any():
-        print(f"Replacing {np.isnan(train_ga).sum()} NaN GA values")
+        print(f"  Replacing {np.isnan(train_ga).sum()} NaN GA values")
         train_ga = np.where(np.isnan(train_ga), np.nanmedian(train_ga), train_ga)
     
     train_site_data, ref_site = create_site_datasets(
@@ -545,12 +695,24 @@ def train(args):
     print("BUILDING MODEL")
     print("="*80)
     
-    cyclegan = CycleGAN2D_MultiSite(
-        img_shape=(138, 176, 1), 
-        ga_embedding_dim=args.ga_embedding_dim,
-        target_sites=target_sites
-    )
-    cyclegan.compile(lr=args.lr, beta_1=args.beta_1)
+    # Build model inside strategy scope for data parallelism, or normally for model parallelism
+    if strategy:
+        with strategy.scope():
+            cyclegan = CycleGAN2D_MultiSite(
+                img_shape=(138, 176, 1), 
+                ga_embedding_dim=args.ga_embedding_dim,
+                target_sites=target_sites,
+                use_multi_gpu=False  # Don't use manual placement with MirroredStrategy
+            )
+            cyclegan.compile(lr=args.lr, beta_1=args.beta_1)
+    else:
+        cyclegan = CycleGAN2D_MultiSite(
+            img_shape=(138, 176, 1), 
+            ga_embedding_dim=args.ga_embedding_dim,
+            target_sites=target_sites,
+            use_multi_gpu=(use_multi_gpu and args.multi_gpu_strategy == 'model_parallel')
+        )
+        cyclegan.compile(lr=args.lr, beta_1=args.beta_1)
     
     print("\n" + "="*80)
     print("CREATING DATASETS")
@@ -565,6 +727,11 @@ def train(args):
             shuffle=True,
             augment=True
         )
+        
+        # Distribute dataset if using data parallelism
+        if strategy:
+            dataset = strategy.experimental_distribute_dataset(dataset)
+        
         site_datasets[site_name] = dataset
         print(f"  {site_name}: {site_data['n_slices']} slices")
     
@@ -621,12 +788,12 @@ def train(args):
                 
                 # SAFETY CHECK: NaN detection
                 if any(np.isnan(v) if not isinstance(v, int) else False for v in losses.values()):
-                    print(f"\n NaN detected at step {step}, skipping...")
+                    print(f"\n  NaN detected at step {step}, skipping...")
                     continue
                 
                 # SAFETY CHECK: Collapse detection
                 if losses.get('collapse_warning', 0) > 10:
-                    print(f"\n WARNING: Discriminator collapse detected! (counter={losses['collapse_warning']})")
+                    print(f"\n  WARNING: Discriminator collapse detected! (counter={losses['collapse_warning']})")
                     print("  Consider: reducing learning rate, increasing lambda weights, or restarting")
                 
                 for k, v in losses.items():
@@ -641,14 +808,14 @@ def train(args):
                 })
                 
             except Exception as e:
-                print(f"\n Error at step {step}: {e}")
+                print(f"\n  Error at step {step}: {e}")
                 import traceback
                 traceback.print_exc()
                 continue
         
         # Average losses
         if not epoch_losses['gen_loss']:
-            print(f" No valid losses for epoch {epoch+1}, skipping...")
+            print(f"  No valid losses for epoch {epoch+1}, skipping...")
             continue
         
         for k in history.keys():
@@ -656,15 +823,24 @@ def train(args):
                 avg_loss = np.mean(epoch_losses[k])
                 history[k].append(avg_loss)
         
+        # MEMORY CLEANUP after each epoch
+        tf.keras.backend.clear_session()
+        import gc
+        gc.collect()
+        
         # Print epoch summary
         print(f"\n  Gen: {history['gen_loss'][-1]:.4f} | "
               f"Disc BCH: {history['disc_BCH_loss'][-1]:.4f} | "
               f"Cycle: {history['cycle_loss'][-1]:.4f} | "
               f"Identity: {history['identity_loss'][-1]:.4f}")
         
+        # Print GPU usage every 10 epochs
+        if (epoch + 1) % 10 == 0:
+            print_gpu_usage()
+        
         # SAFETY CHECK: Early stopping if discriminator collapses
         if history['disc_BCH_loss'][-1] < 0.001 and epoch > 10:
-            print("\n DISCRIMINATOR COLLAPSE DETECTED ")
+            print("\n  DISCRIMINATOR COLLAPSE DETECTED ")
             print("Training stopped early to prevent wasted computation.")
             print("Recommendations:")
             print("  1. Reduce learning rate (try 0.00005)")
@@ -674,7 +850,7 @@ def train(args):
         
         # Save checkpoints
         if (epoch + 1) % args.save_freq == 0:
-            print(f"\n  Saving checkpoint at epoch {epoch+1}")
+            print(f"\n   Saving checkpoint at epoch {epoch+1}")
             cyclegan.gen_site2BCH.save_weights(
                 weight_dir / f'gen_site2BCH_epoch_{epoch+1}.weights.h5'
             )
@@ -708,13 +884,13 @@ def train(args):
     print("="*80)
     
     # Final safety report
-    print("\n TRAINING QUALITY REPORT:")
+    print("\n📊 TRAINING QUALITY REPORT:")
     if len(history['disc_BCH_loss']) > 0:
         final_disc_loss = history['disc_BCH_loss'][-1]
         if final_disc_loss < 0.01:
             print("   POOR: Discriminator collapsed (loss < 0.01)")
         elif final_disc_loss < 0.1:
-            print("   FAIR: Discriminator weak (loss < 0.1)")
+            print("    FAIR: Discriminator weak (loss < 0.1)")
         elif final_disc_loss > 2.0:
             print("   POOR: Discriminator too strong (loss > 2.0)")
         else:
@@ -724,7 +900,7 @@ def train(args):
         if final_gen_loss > 50:
             print("   POOR: Generator struggling (loss > 50)")
         elif final_gen_loss < 5:
-            print("   SUSPICIOUS: Generator may have collapsed (loss < 5)")
+            print("    SUSPICIOUS: Generator may have collapsed (loss < 5)")
         else:
             print("   GOOD: Generator learning")
         
@@ -743,7 +919,7 @@ def train(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Train 2D CycleGAN for fetal brain harmonization'
+        description='Train 2D CycleGAN for fetal brain harmonization with multi-GPU support'
     )
     
     # Data
@@ -756,18 +932,22 @@ def main():
     
     # Training 
     parser.add_argument('--epochs', type=int, default=200)
-    parser.add_argument('--batch_size', type=int, default=16)  # Reduced from 32
-    parser.add_argument('--lr', type=float, default=0.0001)  # Reduced from 0.0002
+    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--lr', type=float, default=0.0001)
     parser.add_argument('--beta_1', type=float, default=0.5)
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=4)
     
     # Output
     parser.add_argument('--weight_dir', default='./weights/cyclegan_2d')
     parser.add_argument('--result_dir', default='./results/cyclegan_2d')
     parser.add_argument('--log_dir', default='./logs/cyclegan_2d')
-    parser.add_argument('--save_freq', type=int, default=25)  # More frequent saves
+    parser.add_argument('--save_freq', type=int, default=25)
     
     # Hardware
-    parser.add_argument('--gpu', default='0')
+    parser.add_argument('--gpu', default='0,1,2', help='GPU IDs to use (comma-separated, e.g., "0,1,2")')
+    parser.add_argument('--multi_gpu_strategy', default='model_parallel', 
+                        choices=['model_parallel', 'data_parallel', 'single'],
+                        help='Multi-GPU strategy: model_parallel (distribute models), data_parallel (distribute batches), single (use one GPU)')
     
     args = parser.parse_args()
     
@@ -777,6 +957,18 @@ def main():
     for arg, value in vars(args).items():
         print(f"  {arg}: {value}")
     print("="*80)
+    
+    # Validate GPU configuration
+    n_gpus = len(args.gpu.split(','))
+    if args.multi_gpu_strategy != 'single' and n_gpus == 1:
+        print("\n  WARNING: Multi-GPU strategy selected but only 1 GPU specified")
+        print("   Switching to single GPU mode")
+        args.multi_gpu_strategy = 'single'
+    
+    if args.multi_gpu_strategy == 'model_parallel' and n_gpus < 2:
+        print("\n  WARNING: Model parallelism requires at least 2 GPUs")
+        print("   Switching to single GPU mode")
+        args.multi_gpu_strategy = 'single'
     
     train(args)
 
