@@ -698,8 +698,7 @@ def train(args):
             print(f"\nUsing model parallelism across {len(gpus)} GPUs")
         else:
             print(f"\nUsing single GPU training")
-    if args.resume_epoch is not None:
-        load_checkpoint(cyclegan, args.weight_dir, args.resume_epoch)
+    
     
     weight_dir = Path(args.weight_dir)
     result_dir = Path(args.result_dir)
@@ -750,6 +749,9 @@ def train(args):
             use_multi_gpu=(use_multi_gpu and args.multi_gpu_strategy == 'model_parallel')
         )
         cyclegan.compile(lr=args.lr, beta_1=args.beta_1)
+
+    if args.resume_epoch is not None:
+        load_checkpoint(cyclegan, args.weight_dir, args.resume_epoch)
     
     print("\n" + "="*80)
     print("CREATING DATASETS")
