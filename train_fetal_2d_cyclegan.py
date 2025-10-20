@@ -625,6 +625,42 @@ class DataAugmenter:
         return image, ga
 
 
+def load_checkpoint(cyclegan, weight_dir, epoch):
+    """Load model weights from a specific epoch"""
+    weight_dir = Path(weight_dir)
+    
+    print(f"\nLoading checkpoint from epoch {epoch}...")
+    
+    # Load forward generator
+    cyclegan.gen_site2BCH.load_weights(
+        weight_dir / f'gen_site2BCH_epoch_{epoch}.weights.h5'
+    )
+    print(f"  Loaded gen_site2BCH")
+    
+    # Load each backward generator
+    for site_name, gen_bwd in cyclegan.gen_BCH2site.items():
+        safe_name = site_name.replace('_', '').replace('-', '')[:20]
+        gen_bwd.load_weights(
+            weight_dir / f'gen_BCH2{safe_name}_epoch_{epoch}.weights.h5'
+        )
+        print(f"  Loaded gen_BCH2{site_name}")
+    
+    # Load BCH discriminator
+    cyclegan.disc_BCH.load_weights(
+        weight_dir / f'disc_BCH_epoch_{epoch}.weights.h5'
+    )
+    print(f"  Loaded disc_BCH")
+    
+    # Load each site discriminator
+    for site_name, disc in cyclegan.disc_sites.items():
+        safe_name = site_name.replace('_', '').replace('-', '')[:20]
+        disc.load_weights(
+            weight_dir / f'disc_{safe_name}_epoch_{epoch}.weights.h5'
+        )
+        print(f"  Loaded disc_{site_name}")
+    
+    print(f"✓ Checkpoint loaded successfully from epoch {epoch}")
+
 def create_tf_dataset(images, ga, batch_size, shuffle=True, augment=True):
     """Create TensorFlow dataset"""
     dataset = tf.data.Dataset.from_tensor_slices((images, ga))
@@ -662,6 +698,8 @@ def train(args):
             print(f"\nUsing model parallelism across {len(gpus)} GPUs")
         else:
             print(f"\nUsing single GPU training")
+    if args.resume_epoch is not None:
+        load_checkpoint(cyclegan, args.weight_dir, args.resume_epoch)
     
     weight_dir = Path(args.weight_dir)
     result_dir = Path(args.result_dir)
@@ -941,6 +979,7 @@ def main():
     parser.add_argument('--lr', type=float, default=0.0001)
     parser.add_argument('--beta_1', type=float, default=0.5)
     parser.add_argument('--gradient_accumulation_steps', type=int, default=4)
+    parser.add_argument('--resume_epoch', type=int, default=None, help='Epoch to resume training from')
     
     # Output
     parser.add_argument('--weight_dir', default='./weights/cyclegan_2d')
