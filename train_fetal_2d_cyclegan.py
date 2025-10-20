@@ -849,13 +849,16 @@ def train(args):
         
         # Save checkpoints
         if (epoch + 1) % args.save_freq == 0:
-            print(f"\n   Saving checkpoint at epoch {epoch+1}")
+            print(f"\n Saving checkpoint at epoch {epoch+1}")
             cyclegan.gen_site2BCH.save_weights(
                 weight_dir / f'gen_site2BCH_epoch_{epoch+1}.weights.h5'
             )
-            cyclegan.gen_BCH2site.save_weights(
-                weight_dir / f'gen_BCH2site_epoch_{epoch+1}.weights.h5'
-            )
+            # Save each backward generator separately
+            for site_name, gen_bwd in cyclegan.gen_BCH2site.items():
+                safe_name = site_name.replace('_', '').replace('-', '')[:20]
+                gen_bwd.save_weights(
+                    weight_dir / f'gen_BCH2{safe_name}_epoch_{epoch+1}.weights.h5'
+                )
             cyclegan.disc_BCH.save_weights(
                 weight_dir / f'disc_BCH_epoch_{epoch+1}.weights.h5'
             )
@@ -868,7 +871,10 @@ def train(args):
     # Save final models
     print("\n Saving final models...")
     cyclegan.gen_site2BCH.save_weights(weight_dir / 'gen_site2BCH_final.weights.h5')
-    cyclegan.gen_BCH2site.save_weights(weight_dir / 'gen_BCH2site_final.weights.h5')
+    # Save each backward generator separately
+    for site_name, gen_bwd in cyclegan.gen_BCH2site.items():
+        safe_name = site_name.replace('_', '').replace('-', '')[:20]
+        gen_bwd.save_weights(weight_dir / f'gen_BCH2{safe_name}_final.weights.h5')
     cyclegan.disc_BCH.save_weights(weight_dir / 'disc_BCH_final.weights.h5')
     for site_name, disc in cyclegan.disc_sites.items():
         safe_name = site_name.replace('_', '').replace('-', '')[:20]
