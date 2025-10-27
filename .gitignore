@@ -196,7 +196,6 @@ checkpoints/
 *.pb
 
 # TensorFlow/Keras
-logs/
 tensorboard_logs/
 tb_logs/
 tf_logs/
