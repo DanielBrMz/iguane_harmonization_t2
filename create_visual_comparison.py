@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib import cm
 import seaborn as sns
+from skimage import exposure
 
 import tensorflow as tf
 from tensorflow.keras import layers, Model
@@ -114,38 +115,105 @@ def build_2d_generator(input_shape=(138, 176, 1), ga_embedding_dim=16, name='gen
 
 
 # ============================================================================
+# CONTRAST ENHANCEMENT FUNCTIONS
+# ============================================================================
+
+def apply_clahe_single(img, clip_limit=0.03):
+    """Apply CLAHE to a single image"""
+    if img.shape[-1] == 1:
+        img_2d = img[:, :, 0]
+    else:
+        img_2d = img
+    
+    # Apply CLAHE
+    img_clahe = exposure.equalize_adapthist(img_2d, clip_limit=clip_limit)
+    
+    # Restore channel dimension if needed
+    if len(img.shape) == 3 and img.shape[-1] == 1:
+        img_clahe = img_clahe[:, :, np.newaxis]
+    
+    return img_clahe
+
+
+def contrast_stretch_single(img, percentile_low=2, percentile_high=98):
+    """Apply contrast stretching to a single image"""
+    mask = (img > 0.05) & (img < 0.95)
+    
+    if mask.sum() > 100:
+        brain_pixels = img[mask]
+        p_low = np.percentile(brain_pixels, percentile_low)
+        p_high = np.percentile(brain_pixels, percentile_high)
+        
+        if p_high > p_low:
+            img_stretched = np.clip((img - p_low) / (p_high - p_low), 0, 1)
+        else:
+            img_stretched = img
+    else:
+        img_stretched = img
+    
+    return img_stretched
+
+
+# ============================================================================
 # VISUALIZATION FUNCTIONS
 # ============================================================================
 
-def create_comparison_panel(original, harmonized, site_name, ga, output_path, epoch='final'):
+def create_comparison_panel(original, harmonized, site_name, ga, output_path, epoch='final', show_enhanced=True):
     """
     Create a comparison panel for a single subject
-    Showing: Original | Harmonized | Difference
+    Showing: Original | Harmonized (Raw) | Enhanced | Difference
     """
     
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    n_cols = 5 if show_enhanced else 3
+    fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 5))
     
     # Squeeze out channel dimension
     if original.shape[-1] == 1:
         original = original[:, :, 0]
-        harmonized = harmonized[:, :, 0]
+        harmonized_display = harmonized[:, :, 0]
+    else:
+        harmonized_display = harmonized
+    
+    col_idx = 0
     
     # Original
-    axes[0].imshow(original, cmap='gray', vmin=0, vmax=1)
-    axes[0].set_title(f'Original\n{site_name}\nGA: {ga:.1f}w', fontsize=12)
-    axes[0].axis('off')
+    axes[col_idx].imshow(original, cmap='gray', vmin=0, vmax=1)
+    axes[col_idx].set_title(f'Original\n{site_name}\nGA: {ga:.1f}w', fontsize=12)
+    axes[col_idx].axis('off')
+    col_idx += 1
     
-    # Harmonized
-    axes[1].imshow(harmonized, cmap='gray', vmin=0, vmax=1)
-    axes[1].set_title(f'Harmonized → BCH\nEpoch: {epoch}', fontsize=12)
-    axes[1].axis('off')
+    # Harmonized (Raw)
+    axes[col_idx].imshow(harmonized_display, cmap='gray', vmin=0, vmax=1)
+    harm_std = np.std(harmonized_display)
+    axes[col_idx].set_title(f'Harmonized (Raw)\nEpoch: {epoch}\nStd: {harm_std:.4f}', fontsize=12)
+    axes[col_idx].axis('off')
+    col_idx += 1
     
-    # Difference
-    diff = np.abs(original - harmonized)
-    im = axes[2].imshow(diff, cmap='hot', vmin=0, vmax=0.3)
-    axes[2].set_title(f'Difference\nMAE: {diff.mean():.4f}', fontsize=12)
-    axes[2].axis('off')
-    plt.colorbar(im, ax=axes[2], fraction=0.046)
+    if show_enhanced:
+        # CLAHE Enhanced
+        harmonized_clahe = apply_clahe_single(harmonized, clip_limit=0.03)
+        if harmonized_clahe.shape[-1] == 1:
+            harmonized_clahe = harmonized_clahe[:, :, 0]
+        axes[col_idx].imshow(harmonized_clahe, cmap='gray', vmin=0, vmax=1)
+        axes[col_idx].set_title(f'CLAHE Enhanced\nStd: {np.std(harmonized_clahe):.4f}', fontsize=12)
+        axes[col_idx].axis('off')
+        col_idx += 1
+        
+        # Contrast Stretched
+        harmonized_stretched = contrast_stretch_single(harmonized, percentile_low=2, percentile_high=98)
+        if harmonized_stretched.shape[-1] == 1:
+            harmonized_stretched = harmonized_stretched[:, :, 0]
+        axes[col_idx].imshow(harmonized_stretched, cmap='gray', vmin=0, vmax=1)
+        axes[col_idx].set_title(f'Contrast Stretched\nStd: {np.std(harmonized_stretched):.4f}', fontsize=12)
+        axes[col_idx].axis('off')
+        col_idx += 1
+    
+    # Difference (using raw harmonized)
+    diff = np.abs(original - harmonized_display)
+    im = axes[col_idx].imshow(diff, cmap='hot', vmin=0, vmax=0.3)
+    axes[col_idx].set_title(f'Difference (Raw)\nMAE: {diff.mean():.4f}', fontsize=12)
+    axes[col_idx].axis('off')
+    plt.colorbar(im, ax=axes[col_idx], fraction=0.046)
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -206,7 +274,94 @@ def create_multisite_comparison(site_images, output_path, epoch='final'):
     
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"✓ Saved multi-site comparison: {output_path}")
+    print(f"✓ Saved histogram comparison: {output_path}")
+
+
+def create_diagnostic_panel(site_images, output_path, epoch='final'):
+    """
+    Create diagnostic panel to detect contrast compression
+    Shows statistics and enhancement comparisons
+    """
+    n_sites = len(site_images)
+    fig, axes = plt.subplots(n_sites, 4, figsize=(20, 5 * n_sites))
+    
+    # Handle single site case
+    if n_sites == 1:
+        axes = axes.reshape(1, -1)
+    
+    for site_idx, (site_name, images_dict) in enumerate(site_images.items()):
+        harmonized = images_dict['harmonized']
+        
+        # Take first example for visualization
+        harm_img = harmonized[0]
+        if harm_img.shape[-1] == 1:
+            harm_img = harm_img[:, :, 0]
+        
+        # Calculate statistics
+        mean_val = np.mean(harm_img)
+        std_val = np.std(harm_img)
+        min_val = np.min(harm_img)
+        max_val = np.max(harm_img)
+        
+        # Detect compression
+        is_compressed = std_val < 0.05
+        is_gray = (mean_val > 0.45) and (mean_val < 0.55)
+        
+        # 1. Raw harmonized
+        axes[site_idx, 0].imshow(harm_img, cmap='gray', vmin=0, vmax=1)
+        status = '⚠️ COMPRESSED' if is_compressed else '✓ Normal'
+        axes[site_idx, 0].set_title(
+            f'{site_name}\nRaw Harmonized\n'
+            f'Mean: {mean_val:.3f}, Std: {std_val:.4f}\n{status}',
+            fontsize=10
+        )
+        axes[site_idx, 0].axis('off')
+        
+        # 2. CLAHE Enhanced
+        harm_clahe = apply_clahe_single(harmonized[0], clip_limit=0.03)
+        if harm_clahe.shape[-1] == 1:
+            harm_clahe = harm_clahe[:, :, 0]
+        axes[site_idx, 1].imshow(harm_clahe, cmap='gray', vmin=0, vmax=1)
+        axes[site_idx, 1].set_title(
+            f'CLAHE Enhanced\nStd: {np.std(harm_clahe):.4f}',
+            fontsize=10
+        )
+        axes[site_idx, 1].axis('off')
+        
+        # 3. Intensity histogram
+        axes[site_idx, 2].hist(harm_img.flatten(), bins=50, alpha=0.7, 
+                               color='blue', label='Raw', density=True)
+        axes[site_idx, 2].hist(harm_clahe.flatten(), bins=50, alpha=0.7,
+                               color='red', label='CLAHE', density=True)
+        axes[site_idx, 2].axvline(mean_val, color='blue', linestyle='--', 
+                                  linewidth=2, label=f'Raw Mean={mean_val:.3f}')
+        axes[site_idx, 2].set_xlabel('Intensity')
+        axes[site_idx, 2].set_ylabel('Density')
+        axes[site_idx, 2].legend(fontsize=8)
+        axes[site_idx, 2].grid(alpha=0.3)
+        
+        # 4. Intensity profile (central horizontal line)
+        center_row = harm_img.shape[0] // 2
+        profile_raw = harm_img[center_row, :]
+        profile_clahe = harm_clahe[center_row, :]
+        
+        axes[site_idx, 3].plot(profile_raw, label='Raw', linewidth=2)
+        axes[site_idx, 3].plot(profile_clahe, label='CLAHE', linewidth=2)
+        axes[site_idx, 3].axhline(mean_val, color='gray', linestyle='--', 
+                                  alpha=0.5, label=f'Mean={mean_val:.3f}')
+        axes[site_idx, 3].set_xlabel('Position (pixels)')
+        axes[site_idx, 3].set_ylabel('Intensity')
+        axes[site_idx, 3].set_title(f'Central Horizontal Profile\nRange: [{min_val:.3f}, {max_val:.3f}]', 
+                                    fontsize=10)
+        axes[site_idx, 3].legend(fontsize=8)
+        axes[site_idx, 3].grid(alpha=0.3)
+    
+    plt.suptitle(f'Contrast Compression Diagnostics (Epoch {epoch})', 
+                 fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"✓ Saved diagnostic panel: {output_path}")
 
 
 def create_histogram_comparison(site_images, output_path):
@@ -373,6 +528,10 @@ def create_visual_comparison(args):
             # Create histogram comparison
             histogram_path = output_dir / f'intensity_histograms_epoch_{epoch}_{timestamp}.png'
             create_histogram_comparison(site_images, histogram_path)
+            
+            # Create diagnostic panel (NEW!)
+            diagnostic_path = output_dir / f'diagnostic_panel_epoch_{epoch}_{timestamp}.png'
+            create_diagnostic_panel(site_images, diagnostic_path, epoch)
     
     print(f"\n{'='*80}")
     print("VISUAL COMPARISON COMPLETE")

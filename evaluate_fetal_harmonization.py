@@ -26,6 +26,7 @@ from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import mean_squared_error as mse
 from scipy.stats import entropy
 from scipy.ndimage import sobel
+from skimage import exposure
 
 print("=" * 80)
 print("FETAL BRAIN HARMONIZATION EVALUATION")
@@ -273,6 +274,188 @@ def comprehensive_metrics(original, harmonized):
     metrics['sharpness_change'] = np.abs(metrics['sharpness_original'] - metrics['sharpness_harmonized'])
     
     return metrics
+
+
+# ============================================================================
+# CONTRAST ENHANCEMENT & DIAGNOSTICS (Fix for Contrast Compression)
+# ============================================================================
+
+def contrast_stretch_output(harmonized_batch, percentile_low=2, percentile_high=98):
+    """
+    Apply contrast stretching to harmonized outputs
+    Fixes the contrast compression problem where outputs are stuck around 0.5
+    
+    Args:
+        harmonized_batch: numpy array of shape (batch, height, width, channels)
+        percentile_low: Lower percentile for stretching (default: 2)
+        percentile_high: Upper percentile for stretching (default: 98)
+    
+    Returns:
+        Contrast-stretched images in [0, 1] range
+    """
+    stretched = []
+    for img in harmonized_batch:
+        # Get non-background pixels (assuming background is very bright or dark)
+        mask = (img > 0.05) & (img < 0.95)  # Exclude extreme values
+        
+        if mask.sum() > 100:  # Need enough pixels
+            brain_pixels = img[mask]
+            
+            # Stretch to use full range
+            p_low = np.percentile(brain_pixels, percentile_low)
+            p_high = np.percentile(brain_pixels, percentile_high)
+            
+            if p_high > p_low:  # Avoid division by zero
+                img_stretched = np.clip((img - p_low) / (p_high - p_low), 0, 1)
+            else:
+                img_stretched = img
+        else:
+            img_stretched = img
+        
+        stretched.append(img_stretched)
+    
+    return np.array(stretched)
+
+
+def apply_clahe(harmonized_batch, clip_limit=0.03, tile_size=8):
+    """
+    Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    Reveals structure in low-contrast harmonized outputs
+    
+    Args:
+        harmonized_batch: numpy array of shape (batch, height, width, channels)
+        clip_limit: Clipping limit for contrast (default: 0.03)
+        tile_size: Size of grid for adaptive equalization (default: 8)
+    
+    Returns:
+        CLAHE-enhanced images in [0, 1] range
+    """
+    enhanced = []
+    for img in harmonized_batch:
+        # Apply CLAHE to each image
+        if img.shape[-1] == 1:
+            img_2d = img[:, :, 0]
+        else:
+            img_2d = img
+        
+        # CLAHE works on uint8, so convert
+        img_uint8 = (img_2d * 255).astype(np.uint8)
+        img_clahe = exposure.equalize_adapthist(
+            img_uint8,
+            clip_limit=clip_limit,
+            nbins=256
+        )
+        
+        # Convert back to float [0, 1] and restore channel dimension
+        if len(img.shape) == 3 and img.shape[-1] == 1:
+            img_clahe = img_clahe[:, :, np.newaxis]
+        
+        enhanced.append(img_clahe)
+    
+    return np.array(enhanced)
+
+
+def diagnose_contrast_compression(harmonized_batch, threshold_std=0.05):
+    """
+    Diagnose if harmonized outputs suffer from contrast compression
+    
+    Args:
+        harmonized_batch: numpy array of harmonized images
+        threshold_std: Standard deviation threshold below which we consider compressed
+    
+    Returns:
+        Dictionary with diagnostic information
+    """
+    diagnostics = {}
+    
+    # Calculate statistics
+    mean_val = np.mean(harmonized_batch)
+    std_val = np.std(harmonized_batch)
+    min_val = np.min(harmonized_batch)
+    max_val = np.max(harmonized_batch)
+    
+    # Check for compression signs
+    is_compressed = std_val < threshold_std
+    is_centered_gray = (mean_val > 0.45) and (mean_val < 0.55)
+    range_narrow = (max_val - min_val) < 0.2
+    
+    # Edge detection to check if structure exists
+    edge_strengths = []
+    for img in harmonized_batch:
+        if img.shape[-1] == 1:
+            img_2d = img[:, :, 0]
+        else:
+            img_2d = img
+        
+        sx = sobel(img_2d, axis=0)
+        sy = sobel(img_2d, axis=1)
+        edges = np.sqrt(sx**2 + sy**2)
+        edge_strengths.append(np.mean(edges))
+    
+    avg_edge_strength = np.mean(edge_strengths)
+    
+    diagnostics['mean'] = float(mean_val)
+    diagnostics['std'] = float(std_val)
+    diagnostics['min'] = float(min_val)
+    diagnostics['max'] = float(max_val)
+    diagnostics['range'] = float(max_val - min_val)
+    diagnostics['avg_edge_strength'] = float(avg_edge_strength)
+    diagnostics['is_compressed'] = bool(is_compressed)
+    diagnostics['is_centered_gray'] = bool(is_centered_gray)
+    diagnostics['range_narrow'] = bool(range_narrow)
+    diagnostics['needs_enhancement'] = bool(is_compressed or (is_centered_gray and range_narrow))
+    
+    # Provide recommendation
+    if diagnostics['needs_enhancement']:
+        if avg_edge_strength > 0.01:
+            diagnostics['recommendation'] = 'Structure detected but compressed - apply CLAHE or contrast stretching'
+        else:
+            diagnostics['recommendation'] = 'Severe compression or mode collapse - retrain with sigmoid activation'
+    else:
+        diagnostics['recommendation'] = 'Output looks normal - no enhancement needed'
+    
+    return diagnostics
+
+
+def compare_enhancement_methods(harmonized_batch, original_batch=None):
+    """
+    Compare different enhancement methods on harmonized outputs
+    
+    Args:
+        harmonized_batch: numpy array of harmonized images
+        original_batch: optional numpy array of original images for comparison
+    
+    Returns:
+        Dictionary with enhanced versions and metrics
+    """
+    results = {
+        'raw': harmonized_batch,
+        'contrast_stretch': contrast_stretch_output(harmonized_batch),
+        'clahe': apply_clahe(harmonized_batch),
+        'diagnostics': diagnose_contrast_compression(harmonized_batch)
+    }
+    
+    # Calculate metrics for each version
+    metrics = {}
+    for method_name, enhanced_imgs in results.items():
+        if method_name == 'diagnostics':
+            continue
+            
+        metrics[method_name] = {
+            'mean': float(np.mean(enhanced_imgs)),
+            'std': float(np.std(enhanced_imgs)),
+            'range': float(np.max(enhanced_imgs) - np.min(enhanced_imgs)),
+            'contrast': float(np.std(enhanced_imgs))
+        }
+        
+        # If we have originals, compare to them
+        if original_batch is not None:
+            mae = np.mean(np.abs(enhanced_imgs - original_batch))
+            metrics[method_name]['mae_vs_original'] = float(mae)
+    
+    results['metrics'] = metrics
+    
+    return results
 
 
 # ============================================================================
