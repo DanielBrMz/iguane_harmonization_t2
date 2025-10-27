@@ -214,7 +214,11 @@ def create_histogram_comparison(site_images, output_path):
     
     n_sites = len(site_images)
     fig, axes = plt.subplots(2, (n_sites + 1) // 2, figsize=(15, 8))
-    axes = axes.flatten() if n_sites > 1 else [axes]
+    # Always flatten axes to handle single or multiple subplots
+    if isinstance(axes, np.ndarray):
+        axes = axes.flatten()
+    else:
+        axes = [axes]
     
     for idx, (site_name, images_dict) in enumerate(site_images.items()):
         originals = images_dict['originals']
