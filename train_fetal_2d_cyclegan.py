@@ -239,11 +239,20 @@ def build_2d_generator(input_shape=(138, 176, 1), ga_embedding_dim=16, name='gen
     if x.shape[1] != input_shape[0] or x.shape[2] != input_shape[1]:
         x = layers.Resizing(input_shape[0], input_shape[1])(x)
     
-    # Output with tanh (range -1 to 1)
-    output = layers.Conv2D(1, 1, padding='same', activation='tanh')(x)
+    # ============================================================
+    # RESIDUAL LEARNING (IGUANe-style)
+    # Generate residual (correction) instead of full image
+    # ============================================================
+    residual = layers.Conv2D(1, 1, padding='same', name='residual_conv')(x)
+    residual = layers.Activation('tanh', name='residual_tanh')(residual)
     
-    # Scale to 0-1
-    output = layers.Lambda(lambda x: (x + 1.0) / 2.0)(output)
+    # ADD residual to input (this preserves anatomy!)
+    # Note: both are in [0,1] range, tanh gives [-1,1] corrections
+    output = layers.Add(name='add_residual')([img_input, residual])
+    
+    # Clip to valid [0,1] range
+    output = layers.Lambda(lambda x: tf.clip_by_value(x, 0.0, 1.0), name='clip_output')(output)
+    # ============================================================
     
     model = Model(inputs=[img_input, ga_input], outputs=output, name=name)
     
@@ -292,6 +301,79 @@ def build_2d_discriminator(input_shape=(138, 176, 1), ga_embedding_dim=16, name=
     model = Model(inputs=[img_input, ga_input], outputs=output, name=name)
     
     return model
+
+
+# ============================================================================
+# CHECKPOINT EVALUATION
+# ============================================================================
+
+def evaluate_checkpoint(generator, site_data, reference_site, result_dir, epoch, batch_size=4):
+    """
+    Evaluate checkpoint by generating sample harmonized images
+    Checks that generator doesn't produce gray/dark collapsed outputs
+    """
+    print(f"\n  Evaluating checkpoint (epoch {epoch})...")
+    
+    eval_dir = result_dir / f'eval_epoch_{epoch}'
+    eval_dir.mkdir(exist_ok=True, parents=True)
+    
+    import matplotlib
+    matplotlib.use('Agg')  # Non-interactive backend
+    import matplotlib.pyplot as plt
+    
+    # Sample from each non-reference site
+    for site_name, site_dict in site_data.items():
+        if site_name == reference_site or site_dict['n_slices'] < batch_size:
+            continue
+        
+        # Get random samples
+        indices = np.random.choice(site_dict['n_slices'], min(batch_size, 8), replace=False)
+        samples_img = site_dict['images'][indices]
+        samples_ga = site_dict['ga'][indices]
+        
+        # Harmonize
+        samples_ga_tf = tf.expand_dims(samples_ga, axis=-1)
+        harmonized = generator.predict([samples_img, samples_ga_tf], verbose=0)
+        
+        # Compute statistics
+        orig_std = np.std(samples_img)
+        harm_std = np.std(harmonized)
+        mean_diff = np.mean(np.abs(samples_img - harmonized))
+        
+        print(f"    {site_name}: orig_std={orig_std:.4f}, harm_std={harm_std:.4f}, diff={mean_diff:.4f}")
+        
+        # Check for collapse
+        if harm_std < 0.05:
+            print(f"    ⚠️  WARNING: Low std detected for {site_name}! Possible collapse.")
+        
+        # Create figure
+        n_show = min(4, len(indices))
+        fig, axes = plt.subplots(n_show, 3, figsize=(12, 3*n_show))
+        if n_show == 1:
+            axes = axes.reshape(1, -1)
+        
+        for i in range(n_show):
+            # Original
+            axes[i, 0].imshow(samples_img[i, :, :, 0], cmap='gray', vmin=0, vmax=1)
+            axes[i, 0].set_title(f'{site_name} (GA:{samples_ga[i]:.1f}w)')
+            axes[i, 0].axis('off')
+            
+            # Harmonized
+            axes[i, 1].imshow(harmonized[i, :, :, 0], cmap='gray', vmin=0, vmax=1)
+            axes[i, 1].set_title(f'→ {reference_site}')
+            axes[i, 1].axis('off')
+            
+            # Difference
+            diff = np.abs(samples_img[i, :, :, 0] - harmonized[i, :, :, 0])
+            im = axes[i, 2].imshow(diff, cmap='hot', vmin=0, vmax=0.3)
+            axes[i, 2].set_title(f'Difference')
+            axes[i, 2].axis('off')
+        
+        plt.tight_layout()
+        plt.savefig(eval_dir / f'{site_name}_comparison.png', dpi=100, bbox_inches='tight')
+        plt.close()
+    
+    print(f"  ✓ Evaluation complete, images saved to {eval_dir}")
 
 
 # ============================================================================
@@ -907,6 +989,9 @@ def train(args):
                 disc.save_weights(
                     weight_dir / f'disc_{safe_name}_epoch_{epoch+1}.weights.h5'
                 )
+            
+            # Evaluate checkpoint to detect gray/dark images early
+            evaluate_checkpoint(cyclegan.gen_site2BCH, train_site_data, ref_site, result_dir, epoch+1)
     
     # Save final models
     print("\n Saving final models...")
