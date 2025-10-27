@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Auto-detecting Contrast Compression Diagnostic
-Works with any site configuration
+CORRECTED Diagnostic Test - Using Universal Forward Generator (IGUANe Style)
+Uses gen_site2BCH which harmonizes ANY site → BCH
 """
 
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
-import sys
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt
@@ -16,7 +15,7 @@ from skimage import exposure
 from scipy.ndimage import sobel
 
 print("=" * 80)
-print("AUTO-DETECTING CONTRAST COMPRESSION DIAGNOSTIC")
+print("CORRECTED DIAGNOSTIC - UNIVERSAL GENERATOR (IGUANe)")
 print("=" * 80)
 
 
@@ -26,50 +25,31 @@ def find_test_data():
         'processed_data_4slice_fixed/test_4slice_data.pkl',
         'processed_data_4slice/test_4slice_data.pkl',
         'test_4slice_data.pkl',
-        'data/test_4slice_data.pkl',
     ]
     
     for path in search_paths:
         if Path(path).exists():
             return path
-    
     return None
-
-
-def find_generators(weight_dir='weights/cyclegan_2d'):
-    """Find all available generators"""
-    weight_path = Path(weight_dir)
-    if not weight_path.exists():
-        return {}
-    
-    generators = {}
-    
-    # Pattern: gen_BCH2{SITENAME}_final.weights.h5
-    for weight_file in weight_path.glob('gen_BCH2*_final.weights.h5'):
-        # Extract site name
-        name = weight_file.stem
-        # Remove 'gen_BCH2' prefix and '_final.weights' suffix
-        site_name = name.replace('gen_BCH2', '').replace('_final.weights', '')
-        generators[site_name] = str(weight_file)
-    
-    return generators
-
-
-def normalize_site_name(site):
-    """Normalize site name to match generator names"""
-    # Remove special characters and convert to expected format
-    normalized = site.replace('_', '').replace('-', '').replace(' ', '')
-    return normalized
 
 
 def diagnose_output(img, name="Image"):
     """Diagnose image statistics"""
     
-    if img.ndim == 3:
-        if img.shape[-1] == 1:
-            img = img[:, :, 0]
-        elif img.shape[-1] == 3:
-            img = img.mean(axis=2)
+    if img.ndim == 3 and img.shape[-1] == 1:
+        img = img[:, :, 0]
+    
+    # Check if completely black or white
+    if np.all(img == 0):
+        print(f"\n{name}:")
+        print(f"  ❌ COMPLETELY BLACK (all zeros)")
+        print(f"  This means generator failed or weights didn't load")
+        return {'failed': True}
+    
+    if np.all(img == 1):
+        print(f"\n{name}:")
+        print(f"  ❌ COMPLETELY WHITE (all ones)")
+        return {'failed': True}
     
     mean_val = np.mean(img)
     std_val = np.std(img)
@@ -85,22 +65,26 @@ def diagnose_output(img, name="Image"):
     # Compression indicators
     is_compressed = std_val < 0.05
     is_gray = (mean_val > 0.4) and (mean_val < 0.6)
-    range_narrow = (max_val - min_val) < 0.2
     
     print(f"\n{name}:")
     print(f"  Mean: {mean_val:.4f}, Std: {std_val:.4f}")
     print(f"  Range: [{min_val:.4f}, {max_val:.4f}] (span: {max_val-min_val:.4f})")
     print(f"  Edge Strength: {edge_strength:.4f}")
     
-    if is_compressed and is_gray:
-        if edge_strength > 0.01:
-            print(f"  ⚠️  CONTRAST COMPRESSED (but structure present!)")
+    if std_val < 0.001:
+        if mean_val < 0.1:
+            print(f"  ❌ NEARLY BLACK - Generator not working")
+        elif mean_val > 0.9:
+            print(f"  ❌ NEARLY WHITE - Generator not working")
         else:
-            print(f"  ❌ POSSIBLE MODE COLLAPSE")
-    elif is_compressed:
-        print(f"  ⚠️  LOW CONTRAST")
+            print(f"  ⚠️  UNIFORM GRAY - Severe compression")
+    elif is_compressed and is_gray:
+        if edge_strength > 0.01:
+            print(f"  ⚠️  CONTRAST COMPRESSED (structure present)")
+        else:
+            print(f"  ❌ MODE COLLAPSE")
     else:
-        print(f"  ✓ Normal contrast")
+        print(f"  ✓ Normal output")
     
     return {
         'mean': mean_val,
@@ -108,102 +92,8 @@ def diagnose_output(img, name="Image"):
         'range': max_val - min_val,
         'edge_strength': edge_strength,
         'is_compressed': is_compressed,
-        'is_gray': is_gray
+        'failed': False
     }
-
-
-def apply_clahe(img):
-    """Apply CLAHE enhancement"""
-    if img.ndim == 3:
-        if img.shape[-1] == 1:
-            img = img[:, :, 0]
-    
-    enhanced = exposure.equalize_adapthist(img, clip_limit=0.03)
-    return enhanced
-
-
-def create_visualization(original, harmonized, output_path):
-    """Create diagnostic visualization"""
-    
-    # Ensure 2D
-    if original.ndim == 3:
-        original = original[:, :, 0] if original.shape[-1] == 1 else original.mean(axis=2)
-    if harmonized.ndim == 3:
-        harmonized = harmonized[:, :, 0] if harmonized.shape[-1] == 1 else harmonized.mean(axis=2)
-    
-    # Apply enhancements
-    harm_clahe = apply_clahe(harmonized)
-    
-    # Contrast stretching
-    mask = (harmonized > 0.05) & (harmonized < 0.95)
-    if mask.sum() > 100:
-        p2, p98 = np.percentile(harmonized[mask], (2, 98))
-        if p98 > p2:
-            harm_stretched = np.clip((harmonized - p2) / (p98 - p2), 0, 1)
-        else:
-            harm_stretched = harmonized.copy()
-    else:
-        harm_stretched = harmonized.copy()
-    
-    # Create figure
-    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
-    
-    # Row 1: Images
-    axes[0, 0].imshow(original, cmap='gray', vmin=0, vmax=1)
-    axes[0, 0].set_title(f'Original\nStd: {np.std(original):.4f}', fontsize=12)
-    axes[0, 0].axis('off')
-    
-    axes[0, 1].imshow(harmonized, cmap='gray', vmin=0, vmax=1)
-    axes[0, 1].set_title(f'Harmonized (Raw)\nStd: {np.std(harmonized):.4f}', fontsize=12)
-    axes[0, 1].axis('off')
-    
-    axes[0, 2].imshow(harm_clahe, cmap='gray', vmin=0, vmax=1)
-    axes[0, 2].set_title(f'CLAHE Enhanced\nStd: {np.std(harm_clahe):.4f}', fontsize=12)
-    axes[0, 2].axis('off')
-    
-    axes[0, 3].imshow(harm_stretched, cmap='gray', vmin=0, vmax=1)
-    axes[0, 3].set_title(f'Contrast Stretched\nStd: {np.std(harm_stretched):.4f}', fontsize=12)
-    axes[0, 3].axis('off')
-    
-    # Row 2: Analysis
-    axes[1, 0].hist(original.flatten(), bins=50, alpha=0.7, color='blue', density=True)
-    axes[1, 0].set_title('Original Histogram')
-    axes[1, 0].set_xlabel('Intensity')
-    axes[1, 0].grid(alpha=0.3)
-    
-    axes[1, 1].hist(harmonized.flatten(), bins=50, alpha=0.7, color='red', density=True)
-    axes[1, 1].axvline(np.mean(harmonized), color='k', linestyle='--', linewidth=2)
-    axes[1, 1].set_title(f'Harmonized Histogram\n(Mean={np.mean(harmonized):.3f})')
-    axes[1, 1].set_xlabel('Intensity')
-    axes[1, 1].grid(alpha=0.3)
-    
-    # Comparison
-    axes[1, 2].hist(harmonized.flatten(), bins=50, alpha=0.5, color='red', label='Raw', density=True)
-    axes[1, 2].hist(harm_clahe.flatten(), bins=50, alpha=0.5, color='green', label='CLAHE', density=True)
-    axes[1, 2].set_title('Enhancement Comparison')
-    axes[1, 2].set_xlabel('Intensity')
-    axes[1, 2].legend()
-    axes[1, 2].grid(alpha=0.3)
-    
-    # Profile
-    center = harmonized.shape[0] // 2
-    axes[1, 3].plot(original[center, :], label='Original', linewidth=2, alpha=0.7)
-    axes[1, 3].plot(harmonized[center, :], label='Harmonized', linewidth=2, alpha=0.7)
-    axes[1, 3].plot(harm_clahe[center, :], label='CLAHE', linewidth=2, alpha=0.7)
-    axes[1, 3].set_title('Central Profile')
-    axes[1, 3].set_xlabel('Position')
-    axes[1, 3].set_ylabel('Intensity')
-    axes[1, 3].legend()
-    axes[1, 3].grid(alpha=0.3)
-    
-    plt.suptitle('Contrast Compression Diagnostic', fontsize=16, fontweight='bold')
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    print(f"\n✓ Saved visualization: {output_path}")
-    
-    return harm_clahe, harm_stretched
 
 
 def main():
@@ -212,10 +102,6 @@ def main():
     
     if test_data_path is None:
         print("  ❌ Could not find test data!")
-        print("  Searched for:")
-        print("    - processed_data_4slice_fixed/test_4slice_data.pkl")
-        print("    - processed_data_4slice/test_4slice_data.pkl")
-        print("\n  Please run this script from your project root directory.")
         return
     
     print(f"  ✓ Found: {test_data_path}")
@@ -231,69 +117,63 @@ def main():
     print(f"  ✓ Loaded {len(test_images)} slices from {len(unique_sites)} sites")
     print(f"  Sites: {', '.join(unique_sites)}")
     
-    print("\n2. FINDING GENERATORS...")
-    generators = find_generators()
-    
-    if not generators:
-        print("  ❌ No generators found in weights/cyclegan_2d/")
-        return
-    
-    print(f"  ✓ Found {len(generators)} generators:")
-    for gen_name in generators.keys():
-        print(f"    - {gen_name}")
-    
-    print("\n3. MATCHING SITE TO GENERATOR...")
-    
-    # Try to find a non-BCH site
+    # Find a non-BCH sample
     non_bch_sites = [s for s in unique_sites if 'BCH' not in s]
-    
     if not non_bch_sites:
         print("  ❌ No non-BCH sites in test data")
         return
     
-    # Try to match a site to a generator
-    test_site = None
-    generator_name = None
-    
-    for site in non_bch_sites:
-        # Try exact match first
-        normalized = normalize_site_name(site)
-        
-        # Check all generators for a match
-        for gen_name in generators.keys():
-            if normalized.lower() in gen_name.lower() or gen_name.lower() in normalized.lower():
-                test_site = site
-                generator_name = gen_name
-                break
-        
-        if test_site:
-            break
-    
-    # If no match, just use first available
-    if not test_site:
-        test_site = non_bch_sites[0]
-        generator_name = list(generators.keys())[0]
-        print(f"  ⚠️  No exact match found, using first available generator")
-    
-    print(f"  ✓ Using site: {test_site}")
-    print(f"  ✓ Using generator: {generator_name}")
-    
-    # Get sample
+    test_site = non_bch_sites[0]
     site_idx = np.where(test_sites == test_site)[0]
-    if len(site_idx) == 0:
-        print(f"  ❌ No samples found for {test_site}")
-        return
-    
     sample_idx = site_idx[0]
     
-    print("\n4. LOADING GENERATOR...")
+    print(f"\n  Using sample from: {test_site}")
+    print(f"  GA: {test_ga[sample_idx]:.1f} weeks")
+    
+    print("\n2. FINDING UNIVERSAL FORWARD GENERATOR...")
+    
+    weight_dir = Path('weights/cyclegan_2d')
+    
+    # Look for the UNIVERSAL forward generator
+    forward_gen_weight = weight_dir / 'gen_site2BCH_final.weights.h5'
+    
+    if not forward_gen_weight.exists():
+        # Try alternative names
+        alternatives = [
+            'gen_A2B_final.weights.h5',
+            'gen_forward_final.weights.h5',
+            'generator_final.weights.h5',
+        ]
+        
+        for alt in alternatives:
+            if (weight_dir / alt).exists():
+                forward_gen_weight = weight_dir / alt
+                break
+    
+    if not forward_gen_weight.exists():
+        print(f"  ❌ Universal forward generator not found!")
+        print(f"     Expected: {forward_gen_weight}")
+        print(f"\n  Available weights:")
+        for f in sorted(weight_dir.glob('*.h5')):
+            print(f"    - {f.name}")
+        print(f"\n  🔍 DIAGNOSIS:")
+        print(f"     The forward generator (gen_site2BCH) should work for ALL sites")
+        print(f"     Backward generators (gen_BCH2{site}) are only for training")
+        return
+    
+    print(f"  ✓ Found universal generator: {forward_gen_weight.name}")
+    print(f"  This generator should work for ANY input site → BCH")
+    
+    print("\n3. LOADING GENERATOR...")
     try:
         import tensorflow as tf
         from train_fetal_2d_cyclegan import build_2d_generator
         
-        gen = build_2d_generator((138, 176, 1), 16, name=f'gen_BCH2{generator_name}')
-        gen.load_weights(generators[generator_name])
-        print(f"  ✓ Loaded weights successfully")
+        # Build the UNIVERSAL forward generator
+        gen_forward = build_2d_generator((138, 176, 1), 16, name='gen_site2BCH')
+        gen_forward.load_weights(str(forward_gen_weight))
+        print(f"  ✓ Loaded universal forward generator")
+        print(f"  This generator harmonizes: ANY_SITE → BCH_CHD")
         
     except Exception as e:
         print(f"  ❌ Error loading generator: {e}")
@@ -301,82 +181,162 @@ def main():
         traceback.print_exc()
         return
     
-    print("\n5. GENERATING HARMONIZED OUTPUT...")
+    print("\n4. TESTING GENERATOR...")
     original = test_images[sample_idx]
     ga_value = test_ga[sample_idx].reshape(1, 1)
+    
+    # Check input is valid
+    print(f"\n  Input Statistics:")
+    print(f"    Mean: {original.mean():.4f}")
+    print(f"    Std: {original.std():.4f}")
+    print(f"    Range: [{original.min():.4f}, {original.max():.4f}]")
+    
+    if original.std() < 0.01:
+        print(f"    ⚠️  WARNING: Input image has very low contrast!")
+        print(f"    This might be a bad sample or preprocessing issue")
+    
+    # Generate harmonized output
+    print(f"\n  Generating harmonized output...")
     img_batch = np.expand_dims(original, axis=0)
     
-    harmonized = gen([img_batch, ga_value], training=False).numpy()[0]
+    try:
+        harmonized = gen_forward([img_batch, ga_value], training=False).numpy()[0]
+        print(f"    ✓ Generation successful")
+    except Exception as e:
+        print(f"    ❌ Generation failed: {e}")
+        return
     
     print("\n" + "="*80)
     print("DIAGNOSTIC RESULTS")
     print("="*80)
     
     orig_stats = diagnose_output(original, "Original")
-    harm_stats = diagnose_output(harmonized, "Harmonized (Raw)")
+    harm_stats = diagnose_output(harmonized, "Harmonized (Universal Generator)")
+    
+    if harm_stats.get('failed', False):
+        print("\n" + "="*80)
+        print("🚨 CRITICAL ISSUE DETECTED")
+        print("="*80)
+        print("\nThe generator is outputting zeros/ones. Possible causes:")
+        print("\n1. WEIGHTS NOT LOADED:")
+        print("   - Check if gen_site2BCH_final.weights.h5 actually exists")
+        print("   - Verify file is not corrupted (should be ~50-200 MB)")
+        print("   - Try loading from earlier epoch checkpoint")
+        
+        print("\n2. ARCHITECTURE MISMATCH:")
+        print("   - Generator architecture changed after training")
+        print("   - Weight shapes don't match layer shapes")
+        print("   - Solution: Use exact same model definition as training")
+        
+        print("\n3. INPUT PREPROCESSING ERROR:")
+        print("   - Check if input is properly normalized to [0, 1]")
+        print("   - Verify input is not all black/white")
+        
+        print("\n4. ACTIVATION FUNCTION ISSUE:")
+        print("   - If using tanh, outputs can saturate to -1 or +1")
+        print("   - After rescaling: -1 → 0 (black), +1 → 1 (white)")
+        print("   - Solution: Switch to sigmoid activation")
+        
+        print("\n📋 RECOMMENDED ACTIONS:")
+        print("   1. Check weight file size:")
+        print(f"      ls -lh {forward_gen_weight}")
+        print("   2. Try earlier checkpoint (e.g., epoch 150 instead of final)")
+        print("   3. Print model summary to verify architecture")
+        print("   4. Test with BCH sample (should be identity mapping)")
+        
+        return
+    
+    # If generation worked, continue with analysis
+    harm_2d = harmonized[:, :, 0] if harmonized.ndim == 3 else harmonized
+    orig_2d = original[:, :, 0] if original.ndim == 3 else original
+    
+    # Apply CLAHE
+    if harm_stats['std'] < 0.05:
+        print(f"\n  Applying CLAHE enhancement...")
+        harm_clahe = exposure.equalize_adapthist(harm_2d, clip_limit=0.03)
+        clahe_stats = diagnose_output(harm_clahe, "CLAHE Enhanced")
     
     # Create visualization
-    output_dir = Path('diagnostics_contrast')
+    output_dir = Path('diagnostics_universal_gen')
     output_dir.mkdir(exist_ok=True)
     
-    harm_clahe, harm_stretched = create_visualization(
-        original, harmonized, 
-        output_dir / 'contrast_diagnostic.png'
-    )
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
     
-    clahe_stats = diagnose_output(harm_clahe, "CLAHE Enhanced")
+    # Row 1: Images
+    axes[0, 0].imshow(orig_2d, cmap='gray', vmin=0, vmax=1)
+    axes[0, 0].set_title(f'Original ({test_site})\nStd: {orig_stats["std"]:.4f}')
+    axes[0, 0].axis('off')
+    
+    axes[0, 1].imshow(harm_2d, cmap='gray', vmin=0, vmax=1)
+    axes[0, 1].set_title(f'Harmonized (Universal Gen)\nStd: {harm_stats["std"]:.4f}')
+    axes[0, 1].axis('off')
+    
+    if harm_stats['std'] < 0.05:
+        axes[0, 2].imshow(harm_clahe, cmap='gray', vmin=0, vmax=1)
+        axes[0, 2].set_title(f'CLAHE Enhanced\nStd: {clahe_stats["std"]:.4f}')
+    else:
+        axes[0, 2].imshow(np.abs(orig_2d - harm_2d), cmap='hot', vmin=0, vmax=0.3)
+        axes[0, 2].set_title(f'Difference Map')
+    axes[0, 2].axis('off')
+    
+    # Row 2: Analysis
+    axes[1, 0].hist(orig_2d.flatten(), bins=50, alpha=0.7, color='blue', density=True)
+    axes[1, 0].set_title('Original Histogram')
+    axes[1, 0].set_xlabel('Intensity')
+    axes[1, 0].grid(alpha=0.3)
+    
+    axes[1, 1].hist(harm_2d.flatten(), bins=50, alpha=0.7, color='red', density=True)
+    axes[1, 1].axvline(harm_stats['mean'], color='k', linestyle='--', linewidth=2)
+    axes[1, 1].set_title(f'Harmonized Histogram')
+    axes[1, 1].set_xlabel('Intensity')
+    axes[1, 1].grid(alpha=0.3)
+    
+    # Profile
+    center = harm_2d.shape[0] // 2
+    axes[1, 2].plot(orig_2d[center, :], label='Original', linewidth=2, alpha=0.7)
+    axes[1, 2].plot(harm_2d[center, :], label='Harmonized', linewidth=2, alpha=0.7)
+    axes[1, 2].set_title('Central Profile')
+    axes[1, 2].set_xlabel('Position')
+    axes[1, 2].set_ylabel('Intensity')
+    axes[1, 2].legend()
+    axes[1, 2].grid(alpha=0.3)
+    
+    plt.suptitle('Universal Generator Test (IGUANe Style)', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    
+    output_path = output_dir / 'universal_generator_test.png'
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"\n✓ Saved visualization: {output_path}")
     
     # Summary
     print("\n" + "="*80)
-    print("SUMMARY & RECOMMENDATIONS")
+    print("SUMMARY")
     print("="*80)
     
-    mae_raw = np.mean(np.abs(original[:,:,0] - harmonized[:,:,0]))
-    mae_clahe = np.mean(np.abs(original[:,:,0] - harm_clahe))
+    mae = np.mean(np.abs(orig_2d - harm_2d))
+    print(f"\nMAE: {mae:.4f}")
     
-    print(f"\nQuantitative Metrics:")
-    print(f"  MAE (raw): {mae_raw:.4f}")
-    print(f"  MAE (CLAHE): {mae_clahe:.4f}")
-    print(f"  Std (raw): {harm_stats['std']:.4f}")
-    print(f"  Std (CLAHE): {clahe_stats['std']:.4f}")
-    print(f"  Edge strength (raw): {harm_stats['edge_strength']:.4f}")
-    
-    if harm_stats['is_compressed'] and harm_stats['is_gray']:
-        print(f"\n⚠️  DIAGNOSIS: CONTRAST COMPRESSION CONFIRMED")
-        
-        if harm_stats['edge_strength'] > 0.01:
-            print(f"\n✓ Good news: Structure IS present (edge strength = {harm_stats['edge_strength']:.4f})")
-            print(f"✓ CLAHE successfully reveals hidden structure")
-            
-            print(f"\n📋 RECOMMENDED ACTIONS:")
-            print(f"\n  SHORT TERM (Use current model with post-processing):")
-            print(f"    • Apply CLAHE enhancement to all harmonized outputs")
-            print(f"    • This will give usable results immediately")
-            
-            print(f"\n  LONG TERM (Retrain for better results):")
-            print(f"    1. Change final activation: tanh → sigmoid")
-            print(f"    2. Increase loss weights:")
-            print(f"         lambda_adversarial = 2.0")
-            print(f"         lambda_cycle = 10.0")
-            print(f"         lambda_identity = 5.0")
-            print(f"    3. Add contrast loss:")
-            print(f"         def contrast_loss(gen_img):")
-            print(f"             std = tf.math.reduce_std(gen_img)")
-            print(f"             return tf.maximum(0.0, 0.15 - std)")
-            print(f"    4. Train for 50-100 epochs and monitor")
-        else:
-            print(f"\n⚠️  Weak edge strength - may need complete retrain")
-            print(f"\n📋 RECOMMENDED ACTIONS:")
-            print(f"    1. Complete retrain with sigmoid activation")
-            print(f"    2. Add perceptual loss (VGG features)")
-            print(f"    3. Significantly increase adversarial weight")
+    if mae < 0.01:
+        print(f"⚠️  Generator is copying input (identity mapping)")
+        print(f"   This is expected if input is already from BCH")
+        print(f"   For other sites, this suggests generator didn't learn")
+    elif mae > 0.5:
+        print(f"⚠️  Very large changes - check if this is reasonable")
     else:
-        print(f"\n✓ DIAGNOSIS: Output appears normal")
-        print(f"  No contrast compression detected")
+        print(f"✓ Reasonable harmonization magnitude")
     
-    print(f"\n{'='*80}")
-    print(f"Results saved to: {output_dir}/")
-    print(f"{'='*80}\n")
+    if harm_stats['std'] < 0.01:
+        print(f"\n❌ CRITICAL: Output has zero/near-zero variation")
+        print(f"   Generator is broken or weights didn't load")
+    elif harm_stats['std'] < 0.05:
+        print(f"\n⚠️  Contrast compression detected")
+        print(f"   See corrected diagnostic report for fixes")
+    else:
+        print(f"\n✓ Output has reasonable contrast")
+    
+    print(f"\n{'='*80}\n")
 
 
 if __name__ == '__main__':
