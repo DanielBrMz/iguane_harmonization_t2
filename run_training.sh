@@ -12,26 +12,27 @@ mkdir -p logs/cyclegan_2d
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOGFILE="logs/cyclegan_2d/training_${TIMESTAMP}.log"
 
-echo "Starting training with residual learning..."
+echo "Starting IGUANe-compliant training..."
 echo "Log file: $LOGFILE"
 echo "PID will be saved to: training.pid"
 
-# Run with nohup
-nohup python3 train_fetal_2d_cyclegan.py \
+# Run with nohup - IGUANe-compliant with 2D-appropriate batch sizes
+nohup python3 train_fetal_2d_cyclegan_iguane_compliant.py \
     --train_data processed_data_4slice/train_4slice_data.pkl \
     --reference_site BCH_CHD \
-    --epochs 200 \
-    --batch_size 16 \
-    --lr_gen 0.0002 \
-    --lr_disc 0.0001 \
+    --epochs 100 \
+    --batch_size_gen 8 \
+    --batch_size_disc 16 \
+    --initial_lr 0.0002 \
+    --final_lr 0.00002 \
     --lambda_cycle 30.0 \
     --lambda_identity 15.0 \
     --save_freq 25 \
     --weight_dir ./weights/cyclegan_2d \
     --result_dir ./results/cyclegan_2d \
     --log_dir ./logs/cyclegan_2d \
+    --ga_embedding_dim 16 \
     --gpu 0,1,2 \
-    --multi_gpu_strategy model_parallel \
     > "$LOGFILE" 2>&1 &
 
 # Save PID
