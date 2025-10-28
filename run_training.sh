@@ -12,12 +12,12 @@ mkdir -p logs/cyclegan_2d
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOGFILE="logs/cyclegan_2d/training_${TIMESTAMP}.log"
 
-echo "Starting IGUANe-compliant training..."
+echo "Starting IGUANe training..."
 echo "Log file: $LOGFILE"
 echo "PID will be saved to: training.pid"
 
-# Run with nohup - IGUANe-compliant with 2D-appropriate batch sizes
-nohup python3 train_fetal_2d_cyclegan_iguane_compliant.py \
+# Run with nohup - IGUANe with 2D-appropriate batch sizes
+nohup python3 train_fetal_2d_cyclegan_iguane.py \
     --train_data processed_data_4slice/train_4slice_data.pkl \
     --reference_site BCH_CHD \
     --epochs 100 \
