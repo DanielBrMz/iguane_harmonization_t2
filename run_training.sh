@@ -17,7 +17,7 @@ echo "Log file: $LOGFILE"
 echo "PID will be saved to: training.pid"
 
 # Run with nohup
-nohup python train_fetal_2d_cyclegan.py \
+nohup python3 train_fetal_2d_cyclegan.py \
     --train_data processed_data_4slice/train_4slice_data.pkl \
     --reference_site BCH_CHD \
     --epochs 200 \
