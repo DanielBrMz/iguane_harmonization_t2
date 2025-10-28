@@ -64,6 +64,126 @@ def extract_view_from_subject_id(subject_id):
         return 'sagittal'
     else:
         return 'unknown'
+    
+def load_bch_training_data(train_data_path):
+    """
+    Load BCH samples from training data for target visualization
+    
+    Returns:
+        Dict with 'images', 'ga', 'subject_ids' for BCH samples only
+    """
+    print("\nLoading BCH samples from training data...")
+    
+    with open(train_data_path, 'rb') as f:
+        train_data = pickle.load(f)
+    
+    # Check available sites
+    unique_sites = np.unique(train_data['site'])
+    print(f"Available sites in training data: {unique_sites}")
+    
+    # Try different BCH site names
+    bch_site_names = ['BCH', 'BCH_CHD', 'BCH_chd', 'bch', 'bch_chd']
+    bch_mask = None
+    actual_bch_name = None
+    
+    for site_name in bch_site_names:
+        mask = train_data['site'] == site_name
+        if mask.sum() > 0:
+            bch_mask = mask
+            actual_bch_name = site_name
+            break
+    
+    if bch_mask is None or bch_mask.sum() == 0:
+        print(f"WARNING: No BCH samples found in training data!")
+        print(f"  Tried: {bch_site_names}")
+        print(f"  Available: {unique_sites}")
+        return {
+            'images': np.array([]),
+            'ga': np.array([]),
+            'subject_ids': np.array([]),
+            'sites': np.array([])
+        }
+    
+    print(f"Found BCH samples under site name: '{actual_bch_name}'")
+    
+    # Extract BCH samples only
+    bch_data = {
+        'images': train_data['images'][bch_mask],
+        'ga': train_data['gestational_age'][bch_mask],
+        'subject_ids': train_data['subject_id'][bch_mask],
+        'sites': train_data['site'][bch_mask]
+    }
+    
+    # Normalize images (check if array is not empty first)
+    if len(bch_data['images']) > 0:
+        if bch_data['images'].max() > 1.0:
+            bch_data['images'] = bch_data['images'].astype(np.float32) / 255.0
+        else:
+            bch_data['images'] = bch_data['images'].astype(np.float32)
+    else:
+        bch_data['images'] = np.array([]).astype(np.float32)
+    
+    # Handle NaN GA
+    if len(bch_data['ga']) > 0:
+        ga_mean = np.nanmean(bch_data['ga'])
+        bch_data['ga'] = np.where(np.isnan(bch_data['ga']), ga_mean, bch_data['ga'])
+        print(f"Loaded {len(bch_data['images'])} BCH training samples")
+        print(f"  GA range: {bch_data['ga'].min():.1f} - {bch_data['ga'].max():.1f} weeks")
+    else:
+        print(f"Loaded {len(bch_data['images'])} BCH training samples (none found)")
+    
+    return bch_data
+
+
+def find_best_bch_match(query_ga, query_view, bch_data, strategy='ga_view'):
+    """
+    Find the best matching BCH image from training data
+    
+    Args:
+        query_ga: Gestational age of query image
+        query_view: Anatomical view ('axial', 'coronal', 'sagittal', 'unknown')
+        bch_data: Dict with BCH training data
+        strategy: 'ga_view' (match both), 'ga_only', 'view_only', or 'random'
+    
+    Returns:
+        Index of best matching BCH image (or None if no BCH data available)
+    """
+    bch_images = bch_data['images']
+    bch_ga = bch_data['ga']
+    bch_subject_ids = bch_data['subject_ids']
+    n_bch = len(bch_images)
+    
+    # Handle empty BCH data
+    if n_bch == 0:
+        return None
+    
+    if strategy == 'random':
+        return np.random.randint(n_bch)
+    
+    # Extract views for all BCH samples
+    bch_views = [extract_view_from_subject_id(sid) for sid in bch_subject_ids]
+    
+    # First filter by view if possible
+    if strategy in ['ga_view', 'view_only'] and query_view != 'unknown':
+        view_candidates = [i for i in range(n_bch) if bch_views[i] == query_view]
+        if len(view_candidates) == 0:
+            print(f"    No BCH samples with view '{query_view}', using all BCH samples")
+            view_candidates = list(range(n_bch))
+    else:
+        view_candidates = list(range(n_bch))
+    
+    # Among view matches, find closest GA
+    if strategy in ['ga_view', 'ga_only']:
+        ga_diffs = [abs(bch_ga[i] - query_ga) for i in view_candidates]
+        best_idx_in_candidates = np.argmin(ga_diffs)
+        best_idx = view_candidates[best_idx_in_candidates]
+        matched_view = bch_views[best_idx]
+        matched_ga = bch_ga[best_idx]
+        print(f"    Matched: view={matched_view}, GA={matched_ga:.1f} (query: view={query_view}, GA={query_ga:.1f})")
+        return best_idx
+    else:
+        # Just return random from candidates
+        return np.random.choice(view_candidates)
 
 def build_2d_generator(input_shape=(138, 176, 1), ga_embedding_dim=16, name='generator'):
     """
@@ -397,10 +517,11 @@ def create_multi_subject_grid(subjects_data, save_path):
 # MAIN PROCESSING
 # ============================================================================
 
-def process_test_data(test_data_path, model_weights_dir, output_dir, 
+def process_test_data(test_data_path, train_data_path, model_weights_dir, output_dir, 
                      validation_csv_path=None,
                      clahe_clip=0.03, detail_alpha=0.25, 
-                     n_samples_per_site=10):
+                     n_samples_per_site=10,
+                     bch_match_strategy='ga_view'):
     """
     Complete processing pipeline
     """
@@ -443,6 +564,13 @@ def process_test_data(test_data_path, model_weights_dir, output_dir,
     # Handle NaN GA values
     ga_mean = np.nanmean(ga)
     ga = np.where(np.isnan(ga), ga_mean, ga)
+    
+    # Load BCH training data for target visualization
+    if train_data_path and Path(train_data_path).exists():
+        bch_data = load_bch_training_data(train_data_path)
+    else:
+        print("\nWARNING: No training data provided, will use BCH from test set")
+        bch_data = None
     
     # Load validation subjects if provided
     validation_subjects = []
@@ -555,10 +683,32 @@ def process_test_data(test_data_path, model_weights_dir, output_dir,
                         bch_matches.append(bch_idx)
                 
                 # If we found view matches, use one; otherwise fall back to any BCH
-                if len(bch_matches) > 0:
-                    bch_idx = np.random.choice(bch_matches)
+                query_view = extract_view_from_subject_id(subject_ids[idx])
+                query_ga = ga[idx]
+
+                if bch_data is not None and len(bch_data['images']) > 0:
+                    # Use training set BCH samples
+                    bch_idx = find_best_bch_match(query_ga, query_view, bch_data, strategy=bch_match_strategy)
+                    if bch_idx is not None:
+                        target_bch = bch_data['images'][bch_idx, :, :, 0]
+                    else:
+                        target_bch = np.zeros_like(original)
+                elif len(bch_indices) > 0:
+                    # Fallback to test set BCH samples
+                    bch_matches = []
+                    for bch_idx in bch_indices:
+                        bch_view = extract_view_from_subject_id(subject_ids[bch_idx])
+                        if bch_view == query_view:
+                            bch_matches.append(bch_idx)
+                    
+                    if len(bch_matches) > 0:
+                        bch_idx = np.random.choice(bch_matches)
+                    else:
+                        bch_idx = np.random.choice(bch_indices)
+                    
+                    target_bch = images[bch_idx, :, :, 0]
                 else:
-                    bch_idx = np.random.choice(bch_indices)
+                    target_bch = np.zeros_like(original)
                 
                 target_bch = images[bch_idx, :, :, 0]
             else:
@@ -829,9 +979,11 @@ Example usage:
     )
     
     parser.add_argument('--test_data', required=True,
-                       help='Path to test_4slice_data.pkl')
+                   help='Path to test_4slice_data.pkl')
+    parser.add_argument('--train_data', default=None,
+                    help='Path to train_4slice_data.pkl (for BCH matching)')
     parser.add_argument('--model_weights', required=True,
-                       help='Directory with model weights')
+                    help='Directory with model weights')
     parser.add_argument('--output', default='./harmonized_results',
                        help='Output directory')
     parser.add_argument('--validation_csv', default=None,
@@ -844,6 +996,10 @@ Example usage:
                        help='Weight for high-frequency detail preservation')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed for reproducibility')
+    parser.add_argument('--bch_match_strategy', 
+                   choices=['ga_view', 'ga_only', 'view_only', 'random'],
+                   default='ga_view',
+                   help='Strategy for matching BCH samples')
     
     args = parser.parse_args()
     
@@ -863,18 +1019,27 @@ Example usage:
     print(f"Detail alpha: {args.detail_alpha}")
     print(f"Random seed: {args.seed}")
     print("="*80)
-    
+
+    # Infer train_data path if not provided
+    if args.train_data is None:
+        test_path = Path(args.test_data)
+        train_path = test_path.parent / test_path.name.replace('test', 'train')
+        if train_path.exists():
+            args.train_data = str(train_path)
+            print(f"Auto-detected training data: {args.train_data}")
+
     # Process
     process_test_data(
         args.test_data,
+        args.train_data,
         args.model_weights,
         args.output,
         validation_csv_path=args.validation_csv,
         clahe_clip=args.clahe_clip,
         detail_alpha=args.detail_alpha,
-        n_samples_per_site=args.n_samples
+        n_samples_per_site=args.n_samples,
+        bch_match_strategy=args.bch_match_strategy
     )
-
 
 if __name__ == "__main__":
     main()
