@@ -183,6 +183,7 @@ def build_2d_generator(input_shape=(138, 176, 1), ga_embedding_dim=16, name='gen
     - Residual learning with conservative scaling (0.2)
     - Batch normalization in decoder for stable gradients
     - Tanh activation allowing positive AND negative corrections
+    - Shape correction for odd dimensions
     """
     
     img_input = layers.Input(shape=input_shape, name='image_input')
@@ -225,8 +226,10 @@ def build_2d_generator(input_shape=(138, 176, 1), ga_embedding_dim=16, name='gen
     ga_spatial = layers.Reshape((x.shape[1], x.shape[2], ga_embedding_dim))(ga_spatial)
     x = layers.Concatenate()([x, ga_spatial])
     
-    # Decoder with batch normalization
+    # Decoder with batch normalization AND shape correction
     x = layers.UpSampling2D(2, interpolation='bilinear')(x)
+    if x.shape[1] != skip3.shape[1] or x.shape[2] != skip3.shape[2]:
+        x = layers.Resizing(skip3.shape[1], skip3.shape[2])(x)
     x = layers.Concatenate()([x, skip3])
     x = layers.Conv2D(128, 3, padding='same')(x)
     x = layers.BatchNormalization()(x)
@@ -236,6 +239,8 @@ def build_2d_generator(input_shape=(138, 176, 1), ga_embedding_dim=16, name='gen
     x = layers.LeakyReLU(0.2)(x)
     
     x = layers.UpSampling2D(2, interpolation='bilinear')(x)
+    if x.shape[1] != skip2.shape[1] or x.shape[2] != skip2.shape[2]:
+        x = layers.Resizing(skip2.shape[1], skip2.shape[2])(x)
     x = layers.Concatenate()([x, skip2])
     x = layers.Conv2D(64, 3, padding='same')(x)
     x = layers.BatchNormalization()(x)
@@ -245,6 +250,8 @@ def build_2d_generator(input_shape=(138, 176, 1), ga_embedding_dim=16, name='gen
     x = layers.LeakyReLU(0.2)(x)
     
     x = layers.UpSampling2D(2, interpolation='bilinear')(x)
+    if x.shape[1] != skip1.shape[1] or x.shape[2] != skip1.shape[2]:
+        x = layers.Resizing(skip1.shape[1], skip1.shape[2])(x)
     x = layers.Concatenate()([x, skip1])
     x = layers.Conv2D(32, 3, padding='same')(x)
     x = layers.BatchNormalization()(x)
@@ -253,21 +260,19 @@ def build_2d_generator(input_shape=(138, 176, 1), ga_embedding_dim=16, name='gen
     x = layers.BatchNormalization()(x)
     x = layers.LeakyReLU(0.2)(x)
     
+    # Final output with shape guarantee
     if x.shape[1] != input_shape[0] or x.shape[2] != input_shape[1]:
         x = layers.Resizing(input_shape[0], input_shape[1])(x)
     
-    # Residual prediction: scale = 0.2 (not too small to avoid "learning nothing")
-    residual = layers.Conv2D(1, 1, padding='same', name='residual_conv')(x)
-    residual = layers.Activation('tanh', name='residual_tanh')(residual)
-    residual = layers.Lambda(lambda x: x * 0.2, name='residual_scale')(residual)
-    
-    output = layers.Add(name='add_residual')([img_input, residual])
-    output = layers.Lambda(lambda x: tf.clip_by_value(x, 0.0, 1.0), name='clip_output')(output)
+    # Residual connection
+    residual = layers.Conv2D(1, 1, padding='same', activation='tanh')(x)
+    residual = layers.Lambda(lambda x: x * 0.2)(residual)  # Scale residuals
+    output = layers.Add()([img_input, residual])
+    output = layers.Lambda(lambda x: tf.clip_by_value(x, 0.0, 1.0))(output)
     
     model = Model(inputs=[img_input, ga_input], outputs=output, name=name)
     
     return model
-
 
 def build_2d_discriminator(input_shape=(138, 176, 1), ga_embedding_dim=16, 
                            use_spectral_norm=True, name='discriminator'):
