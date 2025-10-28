@@ -48,6 +48,23 @@ print("=" * 80)
 # GENERATOR ARCHITECTURE (must match training)
 # ============================================================================
 
+def extract_view_from_subject_id(subject_id):
+    """
+    Extract anatomical view from subject ID or path
+    Returns: 'axial', 'coronal', 'sagittal', or 'unknown'
+    """
+    subject_str = str(subject_id).lower()
+    
+    # Check for view indicators in the string
+    if any(x in subject_str for x in ['_ax', 'axial', '_tra_', 'transverse', '_axi_']):
+        return 'axial'
+    elif any(x in subject_str for x in ['_cor', 'coronal']):
+        return 'coronal'
+    elif any(x in subject_str for x in ['_sag', 'sagittal', '_sg']):
+        return 'sagittal'
+    else:
+        return 'unknown'
+
 def build_2d_generator(input_shape=(138, 176, 1), ga_embedding_dim=16, name='generator'):
     """
     2D U-Net Generator - matches training architecture
@@ -527,7 +544,22 @@ def process_test_data(test_data_path, model_weights_dir, output_dir,
             
             # Get corresponding BCH target
             if len(bch_indices) > 0:
-                bch_idx = np.random.choice(bch_indices)
+                # Extract view from current subject's filename/ID
+                query_view = extract_view_from_subject_id(subject_ids[idx])
+                
+                # Find BCH samples with matching view
+                bch_matches = []
+                for bch_idx in bch_indices:
+                    bch_view = extract_view_from_subject_id(subject_ids[bch_idx])
+                    if bch_view == query_view:
+                        bch_matches.append(bch_idx)
+                
+                # If we found view matches, use one; otherwise fall back to any BCH
+                if len(bch_matches) > 0:
+                    bch_idx = np.random.choice(bch_matches)
+                else:
+                    bch_idx = np.random.choice(bch_indices)
+                
                 target_bch = images[bch_idx, :, :, 0]
             else:
                 target_bch = np.zeros_like(original)
@@ -587,7 +619,22 @@ def process_test_data(test_data_path, model_weights_dir, output_dir,
             
             # Get corresponding BCH target
             if len(bch_indices) > 0:
-                bch_idx = np.random.choice(bch_indices)
+                # Extract view from current subject's filename/ID
+                query_view = extract_view_from_subject_id(subject_ids[idx])
+                
+                # Find BCH samples with matching view
+                bch_matches = []
+                for bch_idx in bch_indices:
+                    bch_view = extract_view_from_subject_id(subject_ids[bch_idx])
+                    if bch_view == query_view:
+                        bch_matches.append(bch_idx)
+                
+                # If we found view matches, use one; otherwise fall back to any BCH
+                if len(bch_matches) > 0:
+                    bch_idx = np.random.choice(bch_matches)
+                else:
+                    bch_idx = np.random.choice(bch_indices)
+                
                 target_bch = images[bch_idx, :, :, 0]
             else:
                 target_bch = np.zeros_like(original)
