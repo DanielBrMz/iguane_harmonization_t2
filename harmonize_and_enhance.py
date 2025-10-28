@@ -302,7 +302,7 @@ def create_multi_subject_grid(subjects_data, save_path):
     n_cols = 4  # Original, Target BCH, Harmonized, Difference
     n_rows = n_subjects
     
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, 4 * n_rows))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 4 * n_rows))
     
     if n_rows == 1:
         axes = axes.reshape(1, -1)
@@ -351,9 +351,15 @@ def create_multi_subject_grid(subjects_data, save_path):
         axes[i, 2].axis('off')
         
         # Difference map with blue-white-red colormap
-        im = axes[i, 3].imshow(difference, cmap='bwr', vmin=-0.3, vmax=0.3)
-        axes[i, 3].set_title(f'Difference\nMean: {diff_mean:.4f}, Max: {diff_max:.4f}', fontsize=10)
+        im = axes[i, 3].imshow(difference, cmap='hot', vmin=0, vmax=0.3)
+        axes[i, 3].set_title(f'Difference |Orig - Harm|\nMean: {diff_mean:.4f}, Max: {diff_max:.4f}', fontsize=10)
         axes[i, 3].axis('off')
+        
+        # Add colorbar only to the first row
+        if i == 0:
+            cbar = plt.colorbar(im, ax=axes[i, 3], fraction=0.046, pad=0.04)
+            cbar.set_label('Intensity Difference', rotation=270, labelpad=15, fontsize=9)
+            cbar.ax.tick_params(labelsize=8)
         
         # Add row label
         axes[i, 0].text(-0.1, 0.5, f'Subject {subject_id}\n({split})', 
