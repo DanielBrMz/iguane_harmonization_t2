@@ -421,7 +421,7 @@ class CycleGAN2D_MultiSite:
     """
     
     def __init__(self, img_shape=(138, 176, 1), ga_embedding_dim=16, target_sites=None, 
-                 use_multi_gpu=True):
+                 use_multi_gpu=True, lambda_cycle=5.0, lambda_identity=2.5):
         self.img_shape = img_shape
         self.ga_embedding_dim = ga_embedding_dim
         self.target_sites = target_sites or []
@@ -489,8 +489,8 @@ class CycleGAN2D_MultiSite:
                 if self.use_multi_gpu:
                     print(f"    Disc {site} → {device}")
         
-        self.lambda_cycle = 5.0
-        self.lambda_identity = 2.5
+        self.lambda_cycle = lambda_cycle
+        self.lambda_identity = lambda_identity
         self.collapse_counter = 0
         
     def compile(self, lr=0.0001, beta_1=0.5):
@@ -820,7 +820,9 @@ def train(args):
                 img_shape=(138, 176, 1), 
                 ga_embedding_dim=args.ga_embedding_dim,
                 target_sites=target_sites,
-                use_multi_gpu=False  # Don't use manual placement with MirroredStrategy
+                use_multi_gpu=False,  # Don't use manual placement with MirroredStrategy
+                lambda_cycle=args.lambda_cycle,
+                lambda_identity=args.lambda_identity
             )
             cyclegan.compile(lr=args.lr, beta_1=args.beta_1)
     else:
@@ -828,7 +830,9 @@ def train(args):
             img_shape=(138, 176, 1), 
             ga_embedding_dim=args.ga_embedding_dim,
             target_sites=target_sites,
-            use_multi_gpu=(use_multi_gpu and args.multi_gpu_strategy == 'model_parallel')
+            use_multi_gpu=(use_multi_gpu and args.multi_gpu_strategy == 'model_parallel'),
+            lambda_cycle=args.lambda_cycle,
+            lambda_identity=args.lambda_identity
         )
         cyclegan.compile(lr=args.lr, beta_1=args.beta_1)
 
@@ -1065,6 +1069,8 @@ def main():
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--lr', type=float, default=0.0001)
     parser.add_argument('--beta_1', type=float, default=0.5)
+    parser.add_argument('--lambda_cycle', type=float, default=5.0, help='Weight for cycle consistency loss')
+    parser.add_argument('--lambda_identity', type=float, default=2.5, help='Weight for identity loss')
     parser.add_argument('--gradient_accumulation_steps', type=int, default=4)
     parser.add_argument('--resume_epoch', type=int, default=None, help='Epoch to resume training from')
     
