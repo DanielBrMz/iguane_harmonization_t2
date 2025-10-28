@@ -393,6 +393,17 @@ def process_test_data(test_data_path, model_weights_dir, output_dir,
     
     print(f"Loaded {len(images)} test samples")
     print(f"Image shape: {images.shape}")
+    print(f"Image dtype: {images.dtype}")
+    print(f"Image range: [{images.min()}, {images.max()}]")
+    
+    # Normalize images to [0, 1] if they're in [0, 255]
+    if images.max() > 1.0:
+        print(f"Normalizing images from [0, 255] to [0, 1]")
+        images = images.astype(np.float32) / 255.0
+    else:
+        images = images.astype(np.float32)
+    
+    print(f"After normalization: [{images.min():.3f}, {images.max():.3f}]")
     print(f"Sites: {np.unique(sites)}")
     
     # Handle NaN GA values
@@ -452,6 +463,14 @@ def process_test_data(test_data_path, model_weights_dir, output_dir,
     # Get BCH samples for target visualization
     bch_mask = sites == 'BCH'
     bch_indices = np.where(bch_mask)[0]
+    
+    if len(bch_indices) == 0:
+        print("\nWARNING: No BCH samples found in test set!")
+        print(f"Available sites: {np.unique(sites)}")
+        # Use any available samples as "target"
+        bch_indices = np.arange(min(10, len(images)))
+    else:
+        print(f"\nFound {len(bch_indices)} BCH samples for target visualization")
     
     # Process by site
     unique_sites = np.unique(sites)
