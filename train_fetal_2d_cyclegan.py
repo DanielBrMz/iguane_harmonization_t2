@@ -820,7 +820,7 @@ def train(args):
     
     # Calculate total training steps for LR schedule
     steps_per_epoch = max([
-        len(train_site_data[s]['images']) // args.batch_size 
+        len(train_site_data[s]['images']) // args.batch_size_gen 
         for s in train_site_data.keys()
     ])
     total_steps = args.epochs * steps_per_epoch
