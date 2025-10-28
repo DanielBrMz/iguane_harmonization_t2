@@ -20,12 +20,12 @@ echo "PID will be saved to: training.pid"
 nohup python train_fetal_2d_cyclegan.py \
     --train_data processed_data_4slice/train_4slice_data.pkl \
     --reference_site BCH_CHD \
-    --epochs 50 \
-    --batch_size 32 \
+    --epochs 200 \
+    --batch_size 16 \
     --lr 0.0002 \
-    --lambda_cycle 5.0 \
-    --lambda_identity 2.5 \
-    --save_freq 5 \
+    --lambda_cycle 30.0 \
+    --lambda_identity 15.0 \
+    --save_freq 25 \
     --weight_dir ./weights/cyclegan_2d \
     --result_dir ./results/cyclegan_2d \
     --log_dir ./logs/cyclegan_2d \
