@@ -568,9 +568,15 @@ class CycleGAN2D_MultiSite:
         self.collapse_counter = 0
         
     def compile(self, lr_gen=0.0002, lr_disc=0.0001, beta_1=0.5):
-        """Compile with separate learning rates for stability"""
+        """Compile with separate optimizers for each discriminator"""
+        
         self.gen_optimizer = Adam(learning_rate=lr_gen, beta_1=beta_1)
-        self.disc_optimizer = Adam(learning_rate=lr_disc, beta_1=beta_1)
+        
+        self.disc_BCH_optimizer = Adam(learning_rate=lr_disc, beta_1=beta_1)
+        
+        self.disc_site_optimizers = {}
+        for site in self.target_sites:
+            self.disc_site_optimizers[site] = Adam(learning_rate=lr_disc, beta_1=beta_1)
         
         print("\nModel compiled:")
         print(f"  Gen site->BCH parameters: {self.gen_site2BCH.count_params():,}")
@@ -580,6 +586,7 @@ class CycleGAN2D_MultiSite:
             print(f"  Disc per-site parameters: {list(self.disc_sites.values())[0].count_params():,} x {len(self.target_sites)}")
         print(f"  Generator LR: {lr_gen}")
         print(f"  Discriminator LR: {lr_disc}")
+        print(f"  Created {1 + len(self.disc_site_optimizers)} discriminator optimizers")
     
     def train_step(self, site_batches):
         """
@@ -630,7 +637,7 @@ class CycleGAN2D_MultiSite:
                 
                 disc_BCH_grads = disc_BCH_tape.gradient(disc_BCH_loss, self.disc_BCH.trainable_variables)
                 disc_BCH_grads, _ = tf.clip_by_global_norm(disc_BCH_grads, 5.0)
-                self.disc_optimizer.apply_gradients(zip(disc_BCH_grads, self.disc_BCH.trainable_variables))
+                self.disc_BCH_optimizer.apply_gradients(zip(disc_BCH_grads, self.disc_BCH.trainable_variables))
             
             # Update site discriminator
             with tf.GradientTape() as disc_site_tape:
@@ -640,7 +647,7 @@ class CycleGAN2D_MultiSite:
             
             disc_site_grads = disc_site_tape.gradient(disc_site_loss, disc_site.trainable_variables)
             disc_site_grads, _ = tf.clip_by_global_norm(disc_site_grads, 5.0)
-            self.disc_optimizer.apply_gradients(zip(disc_site_grads, disc_site.trainable_variables))
+            self.disc_site_optimizers[site_name].apply_gradients(zip(disc_site_grads, disc_site.trainable_variables))
             
             # Compute generator gradients
             with tf.device(self.gpu_assignments['generators']):
