@@ -1,17 +1,6 @@
 """
 2D CycleGAN for Fetal Brain MRI Harmonization
-IGUANe-Compliant Implementation with Critical Architectural Fixes
-
-Key Changes from Previous Version:
-1. MSE (LSGAN) loss instead of sigmoid cross-entropy (IGUANe paper requirement)
-2. InstanceNormalization with MAD instead of BatchNormalization
-3. N forward discriminators (one per source site) - TRUE IGUANe architecture
-4. Removed Spectral Normalization (not in IGUANe)
-5. Linear learning rate decay (0.0002 → 0.00002)
-6. Same LR for generators and discriminators
-7. Reduced batch sizes (closer to IGUANe: gen=1-2, disc=2-4)
-8. Removed dropout from discriminator
-9. Removed label smoothing
+IGUANe-style training with gradient accumulation and comprehensive collapse prevention
 """
 
 import os
@@ -33,7 +22,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras import backend as K
 
 print("="*80)
-print("FETAL BRAIN 2D CYCLEGAN - IGUANE-COMPLIANT TRAINING")
+print("FETAL BRAIN 2D CYCLEGAN - IGUANE TRAINING")
 print("="*80)
 print(f"TensorFlow version: {tf.__version__}")
 print(f"GPUs available: {len(tf.config.list_physical_devices('GPU'))}")
@@ -129,160 +118,124 @@ def create_site_datasets(images, ga, sex, site, reference_site='BCH_CHD'):
 
 
 # ============================================================================
-# INSTANCE NORMALIZATION WITH MAD (IGUANe-Compliant)
+# SPECTRAL NORMALIZATION
 # ============================================================================
 
-class InstanceNormalizationMAD(layers.Layer):
+class SpectralNormalization(layers.Wrapper):
     """
-    Instance Normalization with Mean Absolute Deviation
-    As specified in IGUANe paper (Appendix B.4):
-    'Both generators and discriminators use instance normalization with mean 
-    absolute deviation instead of standard deviation (Wu et al., 2019)'
+    Spectral normalization for discriminator stability
+    Constrains discriminator Lipschitz constant to prevent mode collapse
     """
     
-    def __init__(self, epsilon=1e-5, **kwargs):
-        super(InstanceNormalizationMAD, self).__init__(**kwargs)
-        self.epsilon = epsilon
+    def __init__(self, layer, iteration=1, **kwargs):
+        super(SpectralNormalization, self).__init__(layer, **kwargs)
+        self.iteration = iteration
     
     def build(self, input_shape):
-        # Learnable scale and shift parameters
-        self.gamma = self.add_weight(
-            shape=(input_shape[-1],),
-            initializer='ones',
-            trainable=True,
-            name='gamma'
+        self.layer.build(input_shape)
+        
+        self.w = self.layer.kernel
+        self.w_shape = self.w.shape.as_list()
+        
+        self.u = self.add_weight(
+            shape=(1, self.w_shape[-1]),
+            initializer=tf.initializers.TruncatedNormal(stddev=0.02),
+            trainable=False,
+            name='sn_u',
+            dtype=tf.float32
         )
-        self.beta = self.add_weight(
-            shape=(input_shape[-1],),
-            initializer='zeros',
-            trainable=True,
-            name='beta'
-        )
-        super(InstanceNormalizationMAD, self).build(input_shape)
-    
-    def call(self, x):
-        # Compute mean per instance (across spatial dimensions)
-        mean = tf.reduce_mean(x, axis=[1, 2], keepdims=True)
         
-        # Compute Mean Absolute Deviation (MAD) instead of std
-        mad = tf.reduce_mean(tf.abs(x - mean), axis=[1, 2], keepdims=True)
+        super(SpectralNormalization, self).build()
+    
+    def call(self, inputs, training=None):
+        self.update_weights()
+        output = self.layer(inputs)
+        return output
+    
+    def update_weights(self):
+        w_reshaped = tf.reshape(self.w, [-1, self.w_shape[-1]])
         
-        # Normalize
-        x_norm = (x - mean) / (mad + self.epsilon)
+        u_hat = self.u
+        v_hat = None
         
-        # Scale and shift
-        return self.gamma * x_norm + self.beta
+        for _ in range(self.iteration):
+            v_ = tf.matmul(u_hat, tf.transpose(w_reshaped))
+            v_hat = v_ / (tf.norm(v_) + 1e-12)
+            
+            u_ = tf.matmul(v_hat, w_reshaped)
+            u_hat = u_ / (tf.norm(u_) + 1e-12)
+        
+        sigma = tf.matmul(tf.matmul(v_hat, w_reshaped), tf.transpose(u_hat))
+        
+        self.u.assign(u_hat)
+        self.layer.kernel.assign(self.w / sigma)
 
 
 # ============================================================================
-# LEARNING RATE SCHEDULE (IGUANe-Compliant)
+# NETWORK ARCHITECTURES
 # ============================================================================
 
-class LinearDecaySchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
+def build_2d_generator(input_shape=(138, 176, 1), ga_embedding_dim=16, name='generator'):
     """
-    Linear learning rate decay from initial_lr to final_lr
-    As specified in IGUANe paper (Appendix B.5):
-    'linear learning rate decay from 0.0002 to 0.00002'
-    """
+    2D U-Net Generator with GA Conditioning
     
-    def __init__(self, initial_lr=0.0002, final_lr=0.00002, total_steps=20000):
-        self.initial_lr = tf.cast(initial_lr, tf.float32)
-        self.final_lr = tf.cast(final_lr, tf.float32)
-        self.total_steps = tf.cast(total_steps, tf.float32)
-    
-    def __call__(self, step):
-        step = tf.cast(step, tf.float32)
-        # Linear interpolation
-        alpha = tf.minimum(step / self.total_steps, 1.0)
-        lr = self.initial_lr + alpha * (self.final_lr - self.initial_lr)
-        return lr
-    
-    def get_config(self):
-        return {
-            'initial_lr': float(self.initial_lr),
-            'final_lr': float(self.final_lr),
-            'total_steps': float(self.total_steps)
-        }
-
-
-# ============================================================================
-# NETWORK ARCHITECTURES (IGUANe-Compliant)
-# ============================================================================
-
-def build_2d_generator_iguane(input_shape=(138, 176, 1), ga_embedding_dim=16, name='generator'):
-    """
-    2D U-Net Generator with GA Conditioning - IGUANe-Compliant
-    
-    Key IGUANe features:
-    - InstanceNormalization with MAD (not BatchNorm!)
-    - Residual learning with tanh activation
-    - Multiple skip connections
-    - Output clipped to [0, 1]
+    Anti-collapse features:
+    - Residual learning with conservative scaling (0.2)
+    - Batch normalization in decoder for stable gradients
+    - Tanh activation allowing positive AND negative corrections
+    - Shape correction for odd dimensions
     """
     
     img_input = layers.Input(shape=input_shape, name='image_input')
     ga_input = layers.Input(shape=(1,), name='ga_input')
     
-    # GA embedding (dropout for regularization)
+    # GA embedding with dropout
     ga_embedding = layers.Dense(ga_embedding_dim, activation='relu')(ga_input)
     ga_embedding = layers.Dropout(0.2)(ga_embedding)
     ga_embedding = layers.Dense(ga_embedding_dim, activation='relu')(ga_embedding)
 
-    # Encoder with InstanceNorm (IGUANe style)
+    # Encoder
     x = layers.Conv2D(32, 3, padding='same')(img_input)
-    x = InstanceNormalizationMAD()(x)  # IGUANe: InstanceNorm with MAD!
     x = layers.LeakyReLU(0.2)(x)
     x = layers.Conv2D(32, 3, padding='same')(x)
-    x = InstanceNormalizationMAD()(x)
     x = layers.LeakyReLU(0.2)(x)
     skip1 = x
     x = layers.MaxPooling2D(2)(x)
     
     x = layers.Conv2D(64, 3, padding='same')(x)
-    x = InstanceNormalizationMAD()(x)
     x = layers.LeakyReLU(0.2)(x)
     x = layers.Conv2D(64, 3, padding='same')(x)
-    x = InstanceNormalizationMAD()(x)
     x = layers.LeakyReLU(0.2)(x)
     skip2 = x
     x = layers.MaxPooling2D(2)(x)
     
     x = layers.Conv2D(128, 3, padding='same')(x)
-    x = InstanceNormalizationMAD()(x)
     x = layers.LeakyReLU(0.2)(x)
     x = layers.Conv2D(128, 3, padding='same')(x)
-    x = InstanceNormalizationMAD()(x)
     x = layers.LeakyReLU(0.2)(x)
     skip3 = x
     x = layers.MaxPooling2D(2)(x)
     
     # Bottleneck with GA injection
     x = layers.Conv2D(256, 3, padding='same')(x)
-    x = InstanceNormalizationMAD()(x)
     x = layers.LeakyReLU(0.2)(x)
     x = layers.Conv2D(256, 3, padding='same')(x)
-    x = InstanceNormalizationMAD()(x)
     x = layers.LeakyReLU(0.2)(x)
     
-    # Inject GA embedding
     ga_spatial = layers.RepeatVector(x.shape[1] * x.shape[2])(ga_embedding)
     ga_spatial = layers.Reshape((x.shape[1], x.shape[2], ga_embedding_dim))(ga_spatial)
     x = layers.Concatenate()([x, ga_spatial])
     
-    x = layers.Conv2D(256, 3, padding='same')(x)
-    x = InstanceNormalizationMAD()(x)
-    x = layers.LeakyReLU(0.2)(x)
-    
-    # Decoder with skip connections
+    # Decoder with batch normalization AND shape correction
     x = layers.UpSampling2D(2, interpolation='bilinear')(x)
     if x.shape[1] != skip3.shape[1] or x.shape[2] != skip3.shape[2]:
         x = layers.Resizing(skip3.shape[1], skip3.shape[2])(x)
     x = layers.Concatenate()([x, skip3])
     x = layers.Conv2D(128, 3, padding='same')(x)
-    x = InstanceNormalizationMAD()(x)
+    x = layers.BatchNormalization()(x)
     x = layers.LeakyReLU(0.2)(x)
     x = layers.Conv2D(128, 3, padding='same')(x)
-    x = InstanceNormalizationMAD()(x)
+    x = layers.BatchNormalization()(x)
     x = layers.LeakyReLU(0.2)(x)
     
     x = layers.UpSampling2D(2, interpolation='bilinear')(x)
@@ -290,10 +243,10 @@ def build_2d_generator_iguane(input_shape=(138, 176, 1), ga_embedding_dim=16, na
         x = layers.Resizing(skip2.shape[1], skip2.shape[2])(x)
     x = layers.Concatenate()([x, skip2])
     x = layers.Conv2D(64, 3, padding='same')(x)
-    x = InstanceNormalizationMAD()(x)
+    x = layers.BatchNormalization()(x)
     x = layers.LeakyReLU(0.2)(x)
     x = layers.Conv2D(64, 3, padding='same')(x)
-    x = InstanceNormalizationMAD()(x)
+    x = layers.BatchNormalization()(x)
     x = layers.LeakyReLU(0.2)(x)
     
     x = layers.UpSampling2D(2, interpolation='bilinear')(x)
@@ -301,40 +254,35 @@ def build_2d_generator_iguane(input_shape=(138, 176, 1), ga_embedding_dim=16, na
         x = layers.Resizing(skip1.shape[1], skip1.shape[2])(x)
     x = layers.Concatenate()([x, skip1])
     x = layers.Conv2D(32, 3, padding='same')(x)
-    x = InstanceNormalizationMAD()(x)
+    x = layers.BatchNormalization()(x)
     x = layers.LeakyReLU(0.2)(x)
     x = layers.Conv2D(32, 3, padding='same')(x)
-    x = InstanceNormalizationMAD()(x)
+    x = layers.BatchNormalization()(x)
     x = layers.LeakyReLU(0.2)(x)
     
     # Final output with shape guarantee
     if x.shape[1] != input_shape[0] or x.shape[2] != input_shape[1]:
         x = layers.Resizing(input_shape[0], input_shape[1])(x)
     
-    # IGUANe residual learning: tanh activation, add to input
-    # "The last activation function before the addition is tanh" (Appendix B.4)
+    # Residual connection
     residual = layers.Conv2D(1, 1, padding='same', activation='tanh')(x)
-    
-    # Add residual to input (residual learning)
+    residual = layers.Lambda(lambda x: x * 0.2)(residual)  # Scale residuals
     output = layers.Add()([img_input, residual])
-    
-    # Clip negative values (IGUANe: "negative voxels clipped to background value")
     output = layers.Lambda(lambda x: tf.clip_by_value(x, 0.0, 1.0))(output)
     
     model = Model(inputs=[img_input, ga_input], outputs=output, name=name)
     
     return model
 
-
-def build_2d_discriminator_iguane(input_shape=(138, 176, 1), ga_embedding_dim=16, name='discriminator'):
+def build_2d_discriminator(input_shape=(138, 176, 1), ga_embedding_dim=16, 
+                           use_spectral_norm=True, name='discriminator'):
     """
-    2D PatchGAN Discriminator with GA Conditioning - IGUANe-Compliant
+    2D PatchGAN Discriminator with GA Conditioning
     
-    Key IGUANe features:
-    - InstanceNormalization with MAD (not SpectralNorm!)
-    - NO dropout (not in IGUANe)
-    - LeakyReLU(0.2)
-    - Architecture: C64S2K4 → C128S2K4 → C256S2K4 → C1S1K3
+    Anti-collapse features:
+    - Spectral normalization
+    - Higher dropout (0.4)
+    - No batch norm (unstable with spectral norm)
     """
     
     img_input = layers.Input(shape=input_shape, name='image_input')
@@ -344,370 +292,425 @@ def build_2d_discriminator_iguane(input_shape=(138, 176, 1), ga_embedding_dim=16
     ga_embedding = layers.Dense(ga_embedding_dim, activation='relu')(ga_input)
     ga_embedding = layers.Dense(ga_embedding_dim, activation='relu')(ga_embedding)
     
-    # IGUANe discriminator architecture (2D adaptation)
-    # NO Spectral Normalization! (not in IGUANe)
-    # YES InstanceNormalization with MAD!
-    
-    # C64S2K4
-    x = layers.Conv2D(64, 4, strides=2, padding='same')(img_input)
-    x = InstanceNormalizationMAD()(x)  # IGUANe style!
+    # Discriminator path with spectral normalization
+    conv_layer = layers.Conv2D(64, 4, strides=2, padding='same')
+    if use_spectral_norm:
+        conv_layer = SpectralNormalization(conv_layer)
+    x = conv_layer(img_input)
     x = layers.LeakyReLU(0.2)(x)
-    # NO dropout! (not in IGUANe)
+    x = layers.Dropout(0.4)(x)
     
-    # C128S2K4
-    x = layers.Conv2D(128, 4, strides=2, padding='same')(x)
-    x = InstanceNormalizationMAD()(x)
+    conv_layer = layers.Conv2D(128, 4, strides=2, padding='same')
+    if use_spectral_norm:
+        conv_layer = SpectralNormalization(conv_layer)
+    x = conv_layer(x)
+    x = layers.LeakyReLU(0.2)(x)
+    x = layers.Dropout(0.4)(x)
+    
+    conv_layer = layers.Conv2D(256, 4, strides=2, padding='same')
+    if use_spectral_norm:
+        conv_layer = SpectralNormalization(conv_layer)
+    x = conv_layer(x)
+    x = layers.LeakyReLU(0.2)(x)
+    x = layers.Dropout(0.4)(x)
+    
+    conv_layer = layers.Conv2D(512, 4, strides=1, padding='same')
+    if use_spectral_norm:
+        conv_layer = SpectralNormalization(conv_layer)
+    x = conv_layer(x)
     x = layers.LeakyReLU(0.2)(x)
     
-    # C256S2K4
-    x = layers.Conv2D(256, 4, strides=2, padding='same')(x)
-    x = InstanceNormalizationMAD()(x)
-    x = layers.LeakyReLU(0.2)(x)
-    
-    # Additional layer for 2D (to increase receptive field)
-    x = layers.Conv2D(512, 4, strides=2, padding='same')(x)
-    x = InstanceNormalizationMAD()(x)
-    x = layers.LeakyReLU(0.2)(x)
-    
-    # GA injection
+    # Inject GA
     ga_spatial = layers.RepeatVector(x.shape[1] * x.shape[2])(ga_embedding)
     ga_spatial = layers.Reshape((x.shape[1], x.shape[2], ga_embedding_dim))(ga_spatial)
     x = layers.Concatenate()([x, ga_spatial])
     
-    # C1S1K3 - final classification
-    x = layers.Conv2D(1, 3, strides=1, padding='same')(x)
-    # NO final activation (returns logits for MSE loss)
+    # Output
+    output = layers.Conv2D(1, 4, strides=1, padding='same')(x)
     
-    model = Model(inputs=[img_input, ga_input], outputs=x, name=name)
+    model = Model(inputs=[img_input, ga_input], outputs=output, name=name)
     
     return model
 
 
 # ============================================================================
-# LOSSES (IGUANe-Compliant MSE/LSGAN)
+# CHECKPOINT EVALUATION
 # ============================================================================
 
-def discriminator_loss_mse(real_output, fake_output):
-    """
-    IGUANe discriminator loss using Mean Squared Error (LSGAN)
-    Paper (Section 3.2.3): 'Mean squared error is used as the adversarial loss (Mao et al., 2017)'
+def evaluate_checkpoint(generator, site_data, reference_site, result_dir, epoch, batch_size=4):
+    """Comprehensive checkpoint evaluation with multi-level collapse detection"""
+    print(f"\n  Evaluating checkpoint (epoch {epoch})...")
     
-    For real images: minimize (D(real) - 1)²
-    For fake images: minimize (D(fake) - 0)²
-    """
-    real_loss = tf.reduce_mean(tf.square(real_output - 1.0))
-    fake_loss = tf.reduce_mean(tf.square(fake_output))
-    return real_loss + fake_loss
+    eval_dir = result_dir / f'eval_epoch_{epoch}'
+    eval_dir.mkdir(exist_ok=True, parents=True)
+    
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    
+    collapse_detected = False
+    stats_summary = []
+    
+    for site_name, site_dict in site_data.items():
+        if site_name == reference_site or site_dict['n_slices'] < batch_size:
+            continue
+        
+        indices = np.random.choice(site_dict['n_slices'], min(batch_size, 8), replace=False)
+        samples_img = site_dict['images'][indices]
+        samples_ga = site_dict['ga'][indices]
+        
+        samples_ga_tf = tf.expand_dims(samples_ga, axis=-1)
+        harmonized = generator.predict([samples_img, samples_ga_tf], verbose=0)
+        
+        # Comprehensive statistics
+        orig_std = np.std(samples_img)
+        harm_std = np.std(harmonized)
+        orig_mean = np.mean(samples_img)
+        harm_mean = np.mean(harmonized)
+        mean_diff = np.mean(np.abs(samples_img - harmonized))
+        max_diff = np.max(np.abs(samples_img - harmonized))
+        
+        per_image_stds = [np.std(harmonized[i]) for i in range(len(harmonized))]
+        min_per_image_std = np.min(per_image_stds)
+        
+        # Multi-level collapse detection
+        is_collapsed = False
+        collapse_reasons = []
+        
+        if harm_std < 0.01:
+            is_collapsed = True
+            collapse_reasons.append(f"near-zero std ({harm_std:.4f})")
+        
+        if min_per_image_std < 0.005:
+            is_collapsed = True
+            collapse_reasons.append(f"min per-image std ({min_per_image_std:.4f})")
+        
+        if harm_mean < 0.05 or harm_mean > 0.95:
+            is_collapsed = True
+            collapse_reasons.append(f"extreme mean ({harm_mean:.3f})")
+        
+        if mean_diff < 0.001 and max_diff < 0.01:
+            is_collapsed = True
+            collapse_reasons.append("identity mapping")
+        
+        if np.max(np.abs(harmonized)) < 0.1:
+            is_collapsed = True
+            collapse_reasons.append("near-zero max output")
+        
+        if np.std([np.mean(harmonized[i]) for i in range(len(harmonized))]) < 0.001:
+            is_collapsed = True
+            collapse_reasons.append("constant output")
+        
+        stats_summary.append({
+            'site': site_name,
+            'orig_std': orig_std,
+            'harm_std': harm_std,
+            'orig_mean': orig_mean,
+            'harm_mean': harm_mean,
+            'mean_diff': mean_diff,
+            'max_diff': max_diff,
+            'min_per_image_std': min_per_image_std,
+            'collapsed': is_collapsed,
+            'reasons': ', '.join(collapse_reasons) if collapse_reasons else 'none'
+        })
+        
+        status = "COLLAPSED" if is_collapsed else "OK"
+        print(f"    {site_name}: std={harm_std:.4f}, mean={harm_mean:.4f}, diff={mean_diff:.4f} [{status}]")
+        
+        if is_collapsed:
+            print(f"      Reasons: {', '.join(collapse_reasons)}")
+            collapse_detected = True
+        
+        # Visualization
+        n_show = min(4, len(indices))
+        fig, axes = plt.subplots(n_show, 3, figsize=(12, 3*n_show))
+        if n_show == 1:
+            axes = axes.reshape(1, -1)
+        
+        for i in range(n_show):
+            orig = samples_img[i, :, :, 0]
+            harm = harmonized[i, :, :, 0]
+            diff = np.abs(orig - harm)
+            
+            axes[i, 0].imshow(orig, cmap='gray', vmin=0, vmax=1)
+            axes[i, 0].set_title(f'Original (GA:{samples_ga[i]:.1f}w)')
+            axes[i, 0].axis('off')
+            
+            axes[i, 1].imshow(harm, cmap='gray', vmin=0, vmax=1)
+            axes[i, 1].set_title(f'Harmonized (std:{np.std(harm):.4f})')
+            axes[i, 1].axis('off')
+            
+            axes[i, 2].imshow(diff, cmap='hot', vmin=0, vmax=0.5)
+            axes[i, 2].set_title(f'Diff (max:{np.max(diff):.4f})')
+            axes[i, 2].axis('off')
+        
+        plt.tight_layout()
+        plt.savefig(eval_dir / f'{site_name}.png', dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    stats_df = pd.DataFrame(stats_summary)
+    stats_df.to_csv(eval_dir / 'evaluation_stats.csv', index=False)
+    
+    print(f"  Evaluation complete")
+    
+    return collapse_detected, stats_df
 
 
-def generator_loss_mse(fake_output):
-    """
-    IGUANe generator loss using Mean Squared Error (LSGAN)
-    Generator tries to make discriminator output 1 for fake images
-    minimize (D(G(x)) - 1)²
-    """
-    return tf.reduce_mean(tf.square(fake_output - 1.0))
-
+# ============================================================================
+# LOSSES
+# ============================================================================
 
 def cycle_consistency_loss(real_img, cycled_img):
-    """
-    L1 loss for cycle consistency (IGUANe Appendix B.3)
-    L_cyc = |x - x'|₁ / N
-    """
+    """L1 loss for cycle consistency"""
     return tf.reduce_mean(tf.abs(real_img - cycled_img))
 
 
 def identity_loss(real_img, same_img):
-    """
-    L1 loss for identity mapping (IGUANe Appendix B.3)
-    L_id = |x - x'|₁ / N
-    """
+    """L1 loss for identity mapping"""
     return tf.reduce_mean(tf.abs(real_img - same_img))
 
 
-# ============================================================================
-# DATA PIPELINE
-# ============================================================================
+def discriminator_loss_smooth(real_output, fake_output, label_smoothing=0.1):
+    """Discriminator loss with label smoothing"""
+    real_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+        labels=tf.ones_like(real_output) * (1.0 - label_smoothing), 
+        logits=real_output
+    ))
+    fake_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+        labels=tf.zeros_like(fake_output) + label_smoothing,
+        logits=fake_output
+    ))
+    return real_loss + fake_loss
 
-def create_tf_dataset(images, ga, batch_size=1, shuffle=True, augment=False):
-    """
-    Create TensorFlow dataset with IGUANe-style augmentation
-    
-    IGUANe augmentation (Appendix B.5):
-    - Random translation: ±5 voxels
-    - Random rotation: ±10° (probability 1/2)
-    """
-    dataset = tf.data.Dataset.from_tensor_slices((images, ga))
-    
-    if shuffle:
-        dataset = dataset.shuffle(buffer_size=min(1000, len(images)))
-    
-    dataset = dataset.batch(batch_size, drop_remainder=True)
-    
-    if augment:
-        def augment_fn(img_batch, ga_batch):
-            # IGUANe-style augmentation
-            # Random rotation ±10° with probability 0.5
-            if tf.random.uniform([]) > 0.5:
-                angle = tf.random.uniform([], -10, 10) * (3.14159 / 180.0)
-                img_batch = tfa.image.rotate(img_batch, angle, interpolation='bilinear')
-            
-            # Random translation ±5 pixels (adapted from ±5 voxels)
-            dx = tf.random.uniform([], -5, 5, dtype=tf.int32)
-            dy = tf.random.uniform([], -5, 5, dtype=tf.int32)
-            img_batch = tfa.image.translate(img_batch, [dx, dy])
-            
-            return img_batch, ga_batch
-        
-        try:
-            import tensorflow_addons as tfa
-            dataset = dataset.map(augment_fn, num_parallel_calls=tf.data.AUTOTUNE)
-        except ImportError:
-            print("WARNING: tensorflow_addons not available, using basic augmentation")
-            # Fallback to basic augmentation
-            dataset = dataset.map(
-                lambda img, ga: (tf.image.random_flip_left_right(img), ga),
-                num_parallel_calls=tf.data.AUTOTUNE
-            )
-    
-    dataset = dataset.prefetch(tf.data.AUTOTUNE)
-    
-    return dataset
+
+def generator_loss(fake_output):
+    """Standard GAN generator loss"""
+    return tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+        labels=tf.ones_like(fake_output), logits=fake_output
+    ))
 
 
 # ============================================================================
-# CYCLEGAN MODEL - TRUE IGUANE ARCHITECTURE
+# CYCLEGAN MODEL - IGUANE STYLE
 # ============================================================================
 
-class CycleGAN2D_IGUANe:
+class CycleGAN2D_MultiSite:
     """
-    2D CycleGAN following TRUE IGUANe architecture
-    
-    Key IGUANe features:
-    1. N forward discriminators (one per source site) - CRITICAL!
-    2. MSE (LSGAN) loss instead of cross-entropy
-    3. InstanceNormalization with MAD
-    4. Linear LR decay
-    5. Batch size 1-2 for generators, 2-4 for discriminators
-    6. Same LR for all optimizers
+    2D CycleGAN following IGUANe training procedure
+    GenFwd accumulates gradients from all sites, updated once per step
     """
     
-    def __init__(self, img_shape=(138, 176, 1), ga_embedding_dim=16, target_sites=None,
-                 lambda_cycle=30.0, lambda_identity=15.0):
+    def __init__(self, img_shape=(138, 176, 1), ga_embedding_dim=16, target_sites=None, 
+                 use_multi_gpu=True, lambda_cycle=30.0, lambda_identity=15.0):
         self.img_shape = img_shape
         self.ga_embedding_dim = ga_embedding_dim
-        self.target_sites = target_sites if target_sites else []
+        self.target_sites = target_sites or []
+        self.use_multi_gpu = use_multi_gpu
+        
+        self.gpus = tf.config.list_physical_devices('GPU')
+        self.n_gpus = len(self.gpus)
+        
+        print(f"\nBuilding CycleGAN (IGUANe-style):")
+        print(f"  - 1 universal forward generator (site->BCH)")
+        print(f"  - {len(self.target_sites)} site-specific backward generators")
+        print(f"  - {len(self.target_sites) + 1} discriminators")
+        print(f"  - Lambda cycle: {lambda_cycle}")
+        print(f"  - Lambda identity: {lambda_identity}")
+        
+        # GPU assignment
+        if self.use_multi_gpu and self.n_gpus >= 2:
+            self.gpu_assignments = {
+                'generators': '/GPU:0',
+                'disc_BCH': '/GPU:1' if self.n_gpus >= 2 else '/GPU:0',
+                'disc_sites': '/GPU:2' if self.n_gpus >= 3 else '/GPU:1' if self.n_gpus >= 2 else '/GPU:0'
+            }
+        else:
+            self.gpu_assignments = {
+                'generators': '/GPU:0',
+                'disc_BCH': '/GPU:0',
+                'disc_sites': '/GPU:0'
+            }
+        
+        # Build universal forward generator
+        with tf.device(self.gpu_assignments['generators']):
+            self.gen_site2BCH = build_2d_generator(img_shape, ga_embedding_dim, name='gen_site2BCH')
+        
+        # Build site-specific backward generators
+        self.gen_BCH2site = {}
+        for site in self.target_sites:
+            with tf.device(self.gpu_assignments['generators']):
+                site_name = site.replace('_', '').replace('-', '')[:20]
+                self.gen_BCH2site[site] = build_2d_generator(
+                    img_shape, ga_embedding_dim, name=f'gen_BCH2{site_name}'
+                )
+        
+        # Build BCH discriminator
+        with tf.device(self.gpu_assignments['disc_BCH']):
+            self.disc_BCH = build_2d_discriminator(img_shape, ga_embedding_dim, name='disc_BCH')
+        
+        # Build site discriminators
+        self.disc_sites = {}
+        for i, site in enumerate(self.target_sites):
+            if self.use_multi_gpu and self.n_gpus >= 3:
+                gpu_id = i % self.n_gpus
+                device = f'/GPU:{gpu_id}'
+            else:
+                device = self.gpu_assignments['disc_sites']
+            
+            with tf.device(device):
+                site_name = site.replace('_', '').replace('-', '')[:20]
+                self.disc_sites[site] = build_2d_discriminator(
+                    img_shape, ga_embedding_dim, name=f'disc_{site_name}'
+                )
+        
         self.lambda_cycle = lambda_cycle
         self.lambda_identity = lambda_identity
         self.collapse_counter = 0
         
-        print("\nBuilding IGUANe-compliant CycleGAN architecture...")
+    def compile(self, lr_gen=0.0002, lr_disc=0.0001, beta_1=0.5):
+        """Compile with separate optimizers for each discriminator"""
         
-        # Forward generator (GenFwd): All sites → Reference
-        print("  Building forward generator (site→BCH)...")
-        self.gen_site2BCH = build_2d_generator_iguane(
-            img_shape, ga_embedding_dim, name='gen_site2BCH'
-        )
+        # Store learning rate parameters for later
+        self.lr_gen = lr_gen
+        self.lr_disc = lr_disc
+        self.beta_1 = beta_1
         
-        # Backward generators (GenBwd): Reference → Each site
-        print("  Building backward generators (BCH→site)...")
-        self.gen_BCH2site = {}
-        for site in self.target_sites:
-            site_name = site.replace('_', '').replace('-', '')[:20]
-            self.gen_BCH2site[site] = build_2d_generator_iguane(
-                img_shape, ga_embedding_dim, name=f'gen_BCH2{site_name}'
-            )
+        # Generator optimizer
+        self.gen_optimizer = Adam(learning_rate=lr_gen, beta_1=beta_1)
+        self.gen_optimizer.build(self.gen_site2BCH.trainable_variables)
         
-        # CRITICAL: N forward discriminators (one per source site!)
-        # This is a KEY difference from your previous implementation!
-        print("  Building N forward discriminators (one per source site)...")
-        self.disc_fwd_sites = {}
-        for site in self.target_sites:
-            site_name = site.replace('_', '').replace('-', '')[:20]
-            self.disc_fwd_sites[site] = build_2d_discriminator_iguane(
-                img_shape, ga_embedding_dim, name=f'disc_fwd_{site_name}'
-            )
+        # BCH discriminator optimizer
+        self.disc_BCH_optimizer = Adam(learning_rate=lr_disc, beta_1=beta_1)
+        self.disc_BCH_optimizer.build(self.disc_BCH.trainable_variables)
         
-        # Backward discriminators (DiscBwd): One per source site
-        print("  Building backward discriminators (site discriminators)...")
-        self.disc_sites = {}
-        for site in self.target_sites:
-            site_name = site.replace('_', '').replace('-', '')[:20]
-            self.disc_sites[site] = build_2d_discriminator_iguane(
-                img_shape, ga_embedding_dim, name=f'disc_{site_name}'
-            )
-        
-        # Reference discriminator (for backward path)
-        print("  Building reference discriminator (BCH)...")
-        self.disc_BCH = build_2d_discriminator_iguane(
-            img_shape, ga_embedding_dim, name='disc_BCH'
-        )
-        
-        print("  ✓ Architecture built successfully")
-    
-    def compile(self, initial_lr=0.0002, final_lr=0.00002, total_steps=20000):
-        """
-        Compile with IGUANe-compliant optimizers
-        - Same LR for all optimizers (IGUANe doesn't differentiate)
-        - Linear decay from 0.0002 to 0.00002
-        """
-        
-        lr_schedule = LinearDecaySchedule(initial_lr, final_lr, total_steps)
-        
-        # All optimizers use same LR schedule (IGUANe style)
-        self.gen_optimizer = Adam(learning_rate=lr_schedule, beta_1=0.5, beta_2=0.999)
-        self.disc_BCH_optimizer = Adam(learning_rate=lr_schedule, beta_1=0.5, beta_2=0.999)
-        
-        # Forward discriminator optimizers (one per site)
-        self.disc_fwd_optimizers = {}
-        for site in self.target_sites:
-            self.disc_fwd_optimizers[site] = Adam(
-                learning_rate=lr_schedule, beta_1=0.5, beta_2=0.999
-            )
-        
-        # Backward discriminator optimizers
+        # Site discriminator optimizers
         self.disc_site_optimizers = {}
         for site in self.target_sites:
-            self.disc_site_optimizers[site] = Adam(
-                learning_rate=lr_schedule, beta_1=0.5, beta_2=0.999
-            )
+            opt = Adam(learning_rate=lr_disc, beta_1=beta_1)
+            opt.build(self.disc_sites[site].trainable_variables)
+            self.disc_site_optimizers[site] = opt
         
-        # Backward generator optimizers
+        # Also build optimizers for backward generators
         self.gen_bwd_optimizers = {}
         for site in self.target_sites:
-            self.gen_bwd_optimizers[site] = Adam(
-                learning_rate=lr_schedule, beta_1=0.5, beta_2=0.999
-            )
+            opt = Adam(learning_rate=lr_gen, beta_1=beta_1)
+            opt.build(self.gen_BCH2site[site].trainable_variables)
+            self.gen_bwd_optimizers[site] = opt
         
-        print("\n✓ Model compiled with IGUANe-compliant optimizers:")
-        print(f"  Initial LR: {initial_lr}, Final LR: {final_lr}")
-        print(f"  Total steps: {total_steps}")
-        print(f"  Gen params: {self.gen_site2BCH.count_params():,}")
-        print(f"  Disc params: {self.disc_BCH.count_params():,}")
-        print(f"  N source sites: {len(self.target_sites)}")
-        print(f"  Total optimizers: {1 + len(self.gen_bwd_optimizers) + 1 + len(self.disc_fwd_optimizers) + len(self.disc_site_optimizers)}")
+        print("\nModel compiled:")
+        print(f"  Gen site->BCH parameters: {self.gen_site2BCH.count_params():,}")
+        print(f"  Gen BCH->site parameters: {list(self.gen_BCH2site.values())[0].count_params():,} x {len(self.target_sites)}")
+        print(f"  Disc BCH parameters: {self.disc_BCH.count_params():,}")
+        if self.target_sites:
+            print(f"  Disc per-site parameters: {list(self.disc_sites.values())[0].count_params():,} x {len(self.target_sites)}")
+        print(f"  Generator LR: {lr_gen}")
+        print(f"  Discriminator LR: {lr_disc}")
+        print(f"  Total optimizers: 1 (fwd gen) + {len(self.gen_bwd_optimizers)} (bwd gen) + 1 (disc BCH) + {len(self.disc_site_optimizers)} (disc sites)")
     
-    @tf.function
-    def train_step(self, site_batches, step_counter):
+    def train_step(self, site_batches):
         """
-        IGUANe training step - TRUE architecture
-        
-        For EACH source site (in random order):
-        1. Update forward discriminator (DiscFwdᵢ)
-        2. Update backward discriminator (DiscBwdᵢ)
-        3. Update GenFwd (accumulated) and GenBwdᵢ (immediate)
+        OPTIMIZED IGUANe-style training
+        Key optimizations:
+        1. Single forward pass per generator
+        2. Batch loss accumulation (no .numpy() in loop)
+        3. Non-persistent tape
+        4. Minimal CPU-GPU transfers
         """
         
-        total_gen_loss = 0.0
-        total_disc_BCH_loss = 0.0
-        total_cycle_loss = 0.0
-        total_identity_loss = 0.0
-        total_disc_site_losses = {}
-        n_sites = 0.0
+        # Shuffle sites
+        sites = list(self.target_sites)
+        np.random.shuffle(sites)
         
-        # Accumulate forward generator gradients
+        # Accumulators (keep on GPU as tensors, not numpy)
         accumulated_gen_fwd_grads = None
+        n_sites = tf.constant(0, dtype=tf.float32)
         
-        # Iterate through each source site
-        for site_name, (real_site, ga_site) in site_batches.items():
-            if site_name == 'BCH_CHD':  # Skip reference site
+        # Loss accumulators (tensors, not python floats)
+        total_gen_loss = tf.constant(0.0)
+        total_disc_BCH_loss = tf.constant(0.0)
+        total_cycle_loss = tf.constant(0.0)
+        total_identity_loss = tf.constant(0.0)
+        total_disc_site_losses = {}
+        
+        # Process each site
+        for site_name in sites:
+            if site_name not in site_batches or 'BCH_CHD' not in site_batches:
                 continue
             
-            # Get corresponding backward generator and discriminators
+            real_site, ga_site = site_batches[site_name]
+            real_BCH, ga_BCH = site_batches['BCH_CHD']
+            disc_site = self.disc_sites[site_name]
             gen_BCH2site_i = self.gen_BCH2site[site_name]
-            disc_fwd_i = self.disc_fwd_sites[site_name]  # Forward disc for this site!
-            disc_site = self.disc_sites[site_name]  # Backward disc for this site
-            
-            # Sample reference site data (randomly from batch)
-            ref_site_name = 'BCH_CHD'
-            if ref_site_name in site_batches:
-                real_BCH, ga_BCH = site_batches[ref_site_name]
-            else:
-                # If BCH not in batch, use any other site as fallback
-                real_BCH, ga_BCH = real_site, ga_site
             
             # ============================================================
-            # STEP 1: UPDATE FORWARD DISCRIMINATOR (DiscFwdᵢ)
+            # DISCRIMINATOR UPDATES - Use fake images WITHOUT gradients
             # ============================================================
-            with tf.GradientTape() as disc_fwd_tape:
-                # Generate fake reference images from this source site
-                fake_BCH = self.gen_site2BCH([real_site, ga_site], training=True)
-                
-                # Forward discriminator judges: real BCH vs fake BCH (from sitei)
-                disc_real_BCH = disc_fwd_i([real_BCH, ga_BCH], training=True)
-                disc_fake_BCH = disc_fwd_i([fake_BCH, ga_site], training=True)
-                
-                # MSE loss (LSGAN) - IGUANe style!
-                disc_fwd_loss = discriminator_loss_mse(disc_real_BCH, disc_fake_BCH)
             
-            disc_fwd_grads = disc_fwd_tape.gradient(
-                disc_fwd_loss, disc_fwd_i.trainable_variables
-            )
-            disc_fwd_grads, _ = tf.clip_by_global_norm(disc_fwd_grads, 5.0)
-            self.disc_fwd_optimizers[site_name].apply_gradients(
-                zip(disc_fwd_grads, disc_fwd_i.trainable_variables)
+            # Generate fake images (no gradient tape, much faster)
+            fake_BCH = self.gen_site2BCH([real_site, ga_site], training=False)
+            fake_site = gen_BCH2site_i([real_BCH, ga_BCH], training=False)
+            
+            # Update BCH discriminator
+            with tf.GradientTape() as disc_BCH_tape:
+                disc_real_BCH = self.disc_BCH([real_BCH, ga_BCH], training=True)
+                disc_fake_BCH = self.disc_BCH([fake_BCH, ga_site], training=True)
+                disc_BCH_loss = discriminator_loss_smooth(disc_real_BCH, disc_fake_BCH)
+            
+            disc_BCH_grads = disc_BCH_tape.gradient(disc_BCH_loss, self.disc_BCH.trainable_variables)
+            disc_BCH_grads, _ = tf.clip_by_global_norm(disc_BCH_grads, 5.0)
+            self.disc_BCH_optimizer.apply_gradients(
+                zip(disc_BCH_grads, self.disc_BCH.trainable_variables)
             )
             
-            # ============================================================
-            # STEP 2: UPDATE BACKWARD DISCRIMINATOR (DiscBwdᵢ)
-            # ============================================================
+            # Update site discriminator
             with tf.GradientTape() as disc_site_tape:
-                # Generate fake source images from reference
-                fake_site = gen_BCH2site_i([real_BCH, ga_BCH], training=True)
-                
-                # Backward discriminator judges: real sitei vs fake sitei
                 disc_real_site = disc_site([real_site, ga_site], training=True)
                 disc_fake_site = disc_site([fake_site, ga_BCH], training=True)
-                
-                # MSE loss (LSGAN) - IGUANe style!
-                disc_site_loss = discriminator_loss_mse(disc_real_site, disc_fake_site)
+                disc_site_loss = discriminator_loss_smooth(disc_real_site, disc_fake_site)
             
-            disc_site_grads = disc_site_tape.gradient(
-                disc_site_loss, disc_site.trainable_variables
-            )
+            disc_site_grads = disc_site_tape.gradient(disc_site_loss, disc_site.trainable_variables)
             disc_site_grads, _ = tf.clip_by_global_norm(disc_site_grads, 5.0)
             self.disc_site_optimizers[site_name].apply_gradients(
                 zip(disc_site_grads, disc_site.trainable_variables)
             )
             
             # ============================================================
-            # STEP 3: UPDATE GENERATORS
+            # GENERATOR UPDATES - Reuse discriminator outputs
             # ============================================================
+            
+            # Use TWO separate tapes instead of one persistent tape
             with tf.GradientTape() as fwd_tape, tf.GradientTape() as bwd_tape:
-                # Forward cycle: site → BCH → site
-                fake_BCH_gen = self.gen_site2BCH([real_site, ga_site], training=True)
-                cycled_site = gen_BCH2site_i([fake_BCH_gen, ga_site], training=True)
+                # Forward cycle: site -> BCH -> site
+                fake_BCH_grad = self.gen_site2BCH([real_site, ga_site], training=True)
+                cycled_site = gen_BCH2site_i([fake_BCH_grad, ga_site], training=True)
                 
-                # Backward cycle: BCH → site → BCH
-                fake_site_gen = gen_BCH2site_i([real_BCH, ga_BCH], training=True)
-                cycled_BCH = self.gen_site2BCH([fake_site_gen, ga_BCH], training=True)
+                # Backward cycle: BCH -> site -> BCH
+                fake_site_grad = gen_BCH2site_i([real_BCH, ga_BCH], training=True)
+                cycled_BCH = self.gen_site2BCH([fake_site_grad, ga_BCH], training=True)
                 
                 # Identity
                 identity_BCH = gen_BCH2site_i([real_BCH, ga_BCH], training=True)
                 identity_site = self.gen_site2BCH([real_site, ga_site], training=True)
                 
-                # Discriminator predictions for generator training
-                disc_fake_BCH_gen = disc_fwd_i([fake_BCH_gen, ga_site], training=False)
-                disc_fake_site_gen = disc_site([fake_site_gen, ga_BCH], training=False)
+                # Discriminator predictions (reuse already-updated discriminators)
+                disc_fake_BCH_gen = self.disc_BCH([fake_BCH_grad, ga_site], training=False)
+                disc_fake_site_gen = disc_site([fake_site_grad, ga_BCH], training=False)
                 
-                # Generator losses (MSE/LSGAN style)
-                gen_site2BCH_loss = generator_loss_mse(disc_fake_BCH_gen)
-                gen_BCH2site_loss = generator_loss_mse(disc_fake_site_gen)
+                # Losses
+                gen_site2BCH_loss = generator_loss(disc_fake_BCH_gen)
+                gen_BCH2site_loss = generator_loss(disc_fake_site_gen)
                 
-                # Cycle consistency losses
                 cycle_loss_forward = cycle_consistency_loss(real_site, cycled_site)
                 cycle_loss_backward = cycle_consistency_loss(real_BCH, cycled_BCH)
                 cycle_loss_total = cycle_loss_forward + cycle_loss_backward
                 
-                # Identity losses
                 identity_loss_BCH = identity_loss(real_BCH, identity_BCH)
                 identity_loss_site = identity_loss(real_site, identity_site)
                 identity_loss_total = identity_loss_BCH + identity_loss_site
                 
-                # Combined generator loss (IGUANe formula: L = L_adv + λ*L_cyc + (λ/2)*L_id)
                 gen_loss = (gen_site2BCH_loss + gen_BCH2site_loss + 
-                           self.lambda_cycle * cycle_loss_total + 
-                           (self.lambda_cycle / 2) * identity_loss_total)  # λ/2 for identity!
+                        self.lambda_cycle * cycle_loss_total + 
+                        self.lambda_identity * identity_loss_total)
             
             # Accumulate forward generator gradients
             gen_fwd_vars = self.gen_site2BCH.trainable_variables
@@ -729,16 +732,15 @@ class CycleGAN2D_IGUANe:
                 zip(gen_bwd_grads, gen_bwd_vars)
             )
             
-            # Accumulate metrics
             total_gen_loss += gen_loss
-            total_disc_BCH_loss += disc_fwd_loss  # Note: using forward disc loss
+            total_disc_BCH_loss += disc_BCH_loss
             total_cycle_loss += cycle_loss_total
             total_identity_loss += identity_loss_total
             total_disc_site_losses[site_name] = disc_site_loss
             n_sites += 1.0
         
         # ============================================================
-        # UPDATE FORWARD GENERATOR (once per step, averaged gradients)
+        # UPDATE FORWARD GENERATOR (once per step)
         # ============================================================
         if n_sites > 0 and accumulated_gen_fwd_grads is not None:
             # Average accumulated gradients
@@ -758,20 +760,61 @@ class CycleGAN2D_IGUANe:
         if total_disc_BCH_loss < 0.01:
             self.collapse_counter += 1
         else:
-            self.collapse_counter = tf.maximum(0, self.collapse_counter - 1)
+            self.collapse_counter = max(0, self.collapse_counter - 1)
         
         losses = {
-            'gen_loss': total_gen_loss,
-            'disc_BCH_loss': total_disc_BCH_loss,
-            'cycle_loss': total_cycle_loss,
-            'identity_loss': total_identity_loss,
+            'gen_loss': float(total_gen_loss.numpy()),
+            'disc_BCH_loss': float(total_disc_BCH_loss.numpy()),
+            'cycle_loss': float(total_cycle_loss.numpy()),
+            'identity_loss': float(total_identity_loss.numpy()),
             'collapse_warning': self.collapse_counter
         }
         
         for site_name, loss in total_disc_site_losses.items():
-            losses[f'disc_{site_name}_loss'] = loss
+            losses[f'disc_{site_name}_loss'] = float(loss.numpy())
         
         return losses
+
+
+# ============================================================================
+# DATA AUGMENTATION
+# ============================================================================
+
+class DataAugmenter:
+    """Data augmentation for 2D slices"""
+    
+    @staticmethod
+    @tf.function
+    def augment(image, ga):
+        """Apply random augmentations"""
+        if tf.random.uniform(()) > 0.5:
+            image = tf.image.flip_left_right(image)
+        
+        if tf.random.uniform(()) > 0.5:
+            image = tf.image.random_brightness(image, max_delta=0.05)
+            image = tf.clip_by_value(image, 0.0, 1.0)
+        
+        if tf.random.uniform(()) > 0.5:
+            image = tf.image.random_contrast(image, lower=0.95, upper=1.05)
+            image = tf.clip_by_value(image, 0.0, 1.0)
+        
+        return image, ga
+
+
+def create_tf_dataset(images, ga, batch_size=16, shuffle=True, augment=False):
+    """Create TensorFlow dataset"""
+    dataset = tf.data.Dataset.from_tensor_slices((images, ga))
+    
+    if shuffle:
+        dataset = dataset.shuffle(buffer_size=min(1000, len(images)))
+    
+    if augment:
+        dataset = dataset.map(DataAugmenter.augment, num_parallel_calls=tf.data.AUTOTUNE)
+    
+    dataset = dataset.batch(batch_size)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
+    
+    return dataset
 
 
 # ============================================================================
@@ -779,23 +822,20 @@ class CycleGAN2D_IGUANe:
 # ============================================================================
 
 def train(args):
-    """Main training function"""
+    """Main training loop"""
     
-    # Configure GPU
-    gpus = configure_gpu(args.gpu)
+    tf.config.optimizer.set_jit(True) 
+    gpus = configure_gpu(args.gpu, memory_growth=True)
     
-    # Setup directories
     weight_dir = Path(args.weight_dir)
     result_dir = Path(args.result_dir)
     log_dir = Path(args.log_dir)
-    weight_dir.mkdir(parents=True, exist_ok=True)
-    result_dir.mkdir(parents=True, exist_ok=True)
-    log_dir.mkdir(parents=True, exist_ok=True)
+    
+    weight_dir.mkdir(exist_ok=True, parents=True)
+    result_dir.mkdir(exist_ok=True, parents=True)
+    log_dir.mkdir(exist_ok=True, parents=True)
     
     # Load data
-    print("\n" + "="*80)
-    print("LOADING DATA")
-    print("="*80)
     train_images, train_ga, train_sex, train_site = load_preprocessed_data(args.train_data)
     
     # Create site datasets
@@ -805,60 +845,48 @@ def train(args):
     
     target_sites = [s for s in train_site_data.keys() if s != ref_site]
     
-    # Create model
     print("\n" + "="*80)
-    print("CREATING IGUANE-COMPLIANT MODEL")
+    print("BUILDING MODEL")
     print("="*80)
     
-    cyclegan = CycleGAN2D_IGUANe(
+    # Build CycleGAN
+    cyclegan = CycleGAN2D_MultiSite(
         img_shape=(138, 176, 1),
         ga_embedding_dim=args.ga_embedding_dim,
         target_sites=target_sites,
+        use_multi_gpu=(args.multi_gpu_strategy != 'single'),
         lambda_cycle=args.lambda_cycle,
         lambda_identity=args.lambda_identity
     )
     
-    # Calculate total training steps for LR schedule
-    steps_per_epoch = max([
-        len(train_site_data[s]['images']) // args.batch_size_gen 
-        for s in train_site_data.keys()
-    ])
-    total_steps = args.epochs * steps_per_epoch
+    cyclegan.compile(lr_gen=args.lr_gen, lr_disc=args.lr_disc, beta_1=args.beta_1)
     
-    cyclegan.compile(
-        initial_lr=args.initial_lr,
-        final_lr=args.final_lr,
-        total_steps=total_steps
-    )
-    
-    # Create datasets - IGUANe uses small batch sizes!
+    # Create datasets
     print("\n" + "="*80)
     print("CREATING DATASETS")
     print("="*80)
-    print(f"  Generator batch size: {args.batch_size_gen} (IGUANe uses 1)")
-    print(f"  Discriminator batch size: {args.batch_size_disc} (IGUANe uses 2)")
     
     site_datasets = {}
     for site_name, site_data in train_site_data.items():
         dataset = create_tf_dataset(
             site_data['images'],
             site_data['ga'],
-            batch_size=args.batch_size_gen,  # Use small batch size!
+            batch_size=args.batch_size,
             shuffle=True,
             augment=True
         )
         site_datasets[site_name] = dataset
         print(f"  {site_name}: {site_data['n_slices']} slices")
     
-    # Training loop
     print("\n" + "="*80)
-    print("STARTING IGUANE-COMPLIANT TRAINING")
+    print("STARTING TRAINING")
     print("="*80)
     print(f"Epochs: {args.epochs}")
-    print(f"Steps per epoch: {steps_per_epoch}")
-    print(f"Total steps: {total_steps}")
+    print(f"Batch size: {args.batch_size}")
+    print(f"Generator LR: {args.lr_gen}")
+    print(f"Discriminator LR: {args.lr_disc}")
     print(f"Lambda cycle: {args.lambda_cycle}")
-    print(f"Lambda identity: {args.lambda_cycle / 2}")  # IGUANe uses λ/2!
+    print(f"Lambda identity: {args.lambda_identity}")
     print("="*80)
     
     history = {
@@ -870,8 +898,6 @@ def train(args):
     for site in target_sites:
         history[f'disc_{site}_loss'] = []
     
-    step_counter = tf.Variable(0, trainable=False, dtype=tf.int64)
-    
     for epoch in range(args.epochs):
         print(f"\nEpoch {epoch+1}/{args.epochs}")
         
@@ -879,13 +905,17 @@ def train(args):
         
         site_iters = {name: iter(dataset) for name, dataset in site_datasets.items()}
         
+        steps_per_epoch = max([
+            len(train_site_data[s]['images']) // args.batch_size 
+            for s in train_site_data.keys()
+        ])
+        
         from tqdm import tqdm
         pbar = tqdm(range(steps_per_epoch), desc=f"Epoch {epoch+1}")
         
         for step in pbar:
             site_batches = {}
             
-            # Sample from each site
             for site_name, site_iter in site_iters.items():
                 try:
                     images, ga = next(site_iter)
@@ -900,28 +930,26 @@ def train(args):
                     site_batches[site_name] = (images, ga)
             
             try:
-                losses = cyclegan.train_step(site_batches, step_counter)
-                step_counter.assign_add(1)
-                
-                # Convert losses to numpy
-                losses_np = {k: float(v.numpy()) if tf.is_tensor(v) else v 
-                           for k, v in losses.items()}
+                losses = cyclegan.train_step(site_batches)
                 
                 # NaN detection
-                if any(np.isnan(v) for v in losses_np.values() if isinstance(v, float)):
+                if any(np.isnan(v) if not isinstance(v, int) else False for v in losses.values()):
                     print(f"\n  NaN detected, skipping step {step}")
                     continue
                 
-                # Track losses
-                for k, v in losses_np.items():
-                    if k in epoch_losses and isinstance(v, float):
+                # Collapse warning
+                if losses.get('collapse_warning', 0) > 30:
+                    print(f"\n  WARNING: Persistent discriminator saturation")
+                
+                for k, v in losses.items():
+                    if k in epoch_losses and not isinstance(v, int):
                         epoch_losses[k].append(v)
                 
                 pbar.set_postfix({
-                    'G': f"{losses_np['gen_loss']:.3f}",
-                    'D': f"{losses_np['disc_BCH_loss']:.3f}",
-                    'Cyc': f"{losses_np['cycle_loss']:.3f}",
-                    'Collapse': losses_np.get('collapse_warning', 0)
+                    'G': f"{losses['gen_loss']:.3f}",
+                    'D_BCH': f"{losses['disc_BCH_loss']:.3f}",
+                    'Cyc': f"{losses['cycle_loss']:.3f}",
+                    'Collapse': losses.get('collapse_warning', 0)
                 })
                 
             except Exception as e:
@@ -940,11 +968,26 @@ def train(args):
                 avg_loss = np.mean(epoch_losses[k])
                 history[k].append(avg_loss)
         
+        # Memory cleanup
+        tf.keras.backend.clear_session()
+        import gc
+        gc.collect()
+        
         # Print summary
         print(f"\n  Gen: {history['gen_loss'][-1]:.4f} | "
-              f"Disc: {history['disc_BCH_loss'][-1]:.4f} | "
+              f"Disc BCH: {history['disc_BCH_loss'][-1]:.4f} | "
               f"Cycle: {history['cycle_loss'][-1]:.4f} | "
               f"Identity: {history['identity_loss'][-1]:.4f}")
+        
+        # GPU monitoring
+        if (epoch + 1) % 10 == 0:
+            print_gpu_usage()
+        
+        # Early stopping
+        if history['disc_BCH_loss'][-1] < 0.001 and epoch > 10:
+            print("\n  CRITICAL: Discriminator collapse detected")
+            print("  Training stopped early")
+            break
         
         # Save checkpoints
         if (epoch + 1) % args.save_freq == 0:
@@ -952,13 +995,38 @@ def train(args):
             cyclegan.gen_site2BCH.save_weights(
                 weight_dir / f'gen_site2BCH_epoch_{epoch+1}.weights.h5'
             )
+            for site_name, gen_bwd in cyclegan.gen_BCH2site.items():
+                safe_name = site_name.replace('_', '').replace('-', '')[:20]
+                gen_bwd.save_weights(
+                    weight_dir / f'gen_BCH2{safe_name}_epoch_{epoch+1}.weights.h5'
+                )
             cyclegan.disc_BCH.save_weights(
                 weight_dir / f'disc_BCH_epoch_{epoch+1}.weights.h5'
             )
+            for site_name, disc in cyclegan.disc_sites.items():
+                safe_name = site_name.replace('_', '').replace('-', '')[:20]
+                disc.save_weights(
+                    weight_dir / f'disc_{safe_name}_epoch_{epoch+1}.weights.h5'
+                )
+            
+            # Evaluate
+            collapse_detected, stats_df = evaluate_checkpoint(
+                cyclegan.gen_site2BCH, train_site_data, ref_site, result_dir, epoch+1
+            )
+            
+            if collapse_detected:
+                print(f"\n  WARNING: Collapse detected at epoch {epoch+1}")
     
     # Save final models
     print("\n  Saving final models...")
     cyclegan.gen_site2BCH.save_weights(weight_dir / 'gen_site2BCH_final.weights.h5')
+    for site_name, gen_bwd in cyclegan.gen_BCH2site.items():
+        safe_name = site_name.replace('_', '').replace('-', '')[:20]
+        gen_bwd.save_weights(weight_dir / f'gen_BCH2{safe_name}_final.weights.h5')
+    cyclegan.disc_BCH.save_weights(weight_dir / 'disc_BCH_final.weights.h5')
+    for site_name, disc in cyclegan.disc_sites.items():
+        safe_name = site_name.replace('_', '').replace('-', '')[:20]
+        disc.save_weights(weight_dir / f'disc_{safe_name}_final.weights.h5')
     
     # Save history
     history_df = pd.DataFrame(history)
@@ -967,6 +1035,35 @@ def train(args):
     print("\n" + "="*80)
     print("TRAINING COMPLETE")
     print("="*80)
+    
+    # Quality report
+    print("\nTRAINING QUALITY REPORT:")
+    if len(history['disc_BCH_loss']) > 0:
+        final_disc_loss = history['disc_BCH_loss'][-1]
+        if final_disc_loss < 0.01:
+            print("  Discriminator: Collapsed")
+        elif final_disc_loss < 0.3:
+            print("  Discriminator: Weak")
+        elif final_disc_loss > 2.0:
+            print("  Discriminator: Too strong")
+        else:
+            print("  Discriminator: Healthy")
+        
+        final_gen_loss = history['gen_loss'][-1]
+        if final_gen_loss > 50:
+            print("  Generator: Struggling")
+        elif final_gen_loss < 5:
+            print("  Generator: Possibly collapsed")
+        else:
+            print("  Generator: Learning")
+        
+        final_cycle = history['cycle_loss'][-1]
+        if final_cycle < 0.2:
+            print("  Cycle consistency: Excellent")
+        elif final_cycle < 1.0:
+            print("  Cycle consistency: Good")
+        else:
+            print("  Cycle consistency: Weak")
 
 
 # ============================================================================
@@ -975,45 +1072,45 @@ def train(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Train IGUANe-compliant 2D CycleGAN for fetal brain harmonization'
+        description='Train 2D CycleGAN for fetal brain harmonization (IGUANe-style)'
     )
     
     # Data
     parser.add_argument('--train_data', default='processed_data_4slice/train_4slice_data.pkl')
+    parser.add_argument('--val_data', default='processed_data_4slice/val_4slice_data.pkl')
     parser.add_argument('--reference_site', default='BCH_CHD')
     
     # Model
     parser.add_argument('--ga_embedding_dim', type=int, default=16)
     
-    # Training - IGUANe-compliant hyperparameters
-    parser.add_argument('--epochs', type=int, default=100,
-                       help='IGUANe uses 100 epochs')
-    parser.add_argument('--batch_size_gen', type=int, default=1,
-                       help='Generator batch size (IGUANe uses 1)')
-    parser.add_argument('--batch_size_disc', type=int, default=2,
-                       help='Discriminator batch size (IGUANe uses 2)')
-    parser.add_argument('--initial_lr', type=float, default=0.0002,
-                       help='Initial learning rate (IGUANe: 0.0002)')
-    parser.add_argument('--final_lr', type=float, default=0.00002,
-                       help='Final learning rate (IGUANe: 0.00002)')
-    parser.add_argument('--lambda_cycle', type=float, default=30.0,
-                       help='Cycle consistency loss weight (IGUANe: 30)')
-    parser.add_argument('--lambda_identity', type=float, default=15.0,
-                       help='Identity loss weight (IGUANe: λ/2 = 15)')
+    # Training 
+    parser.add_argument('--epochs', type=int, default=200)
+    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--lr_gen', type=float, default=0.0002, 
+                       help='Generator learning rate')
+    parser.add_argument('--lr_disc', type=float, default=0.0001, 
+                       help='Discriminator learning rate')
+    parser.add_argument('--beta_1', type=float, default=0.5)
+    parser.add_argument('--lambda_cycle', type=float, default=30.0, 
+                       help='Cycle consistency loss weight')
+    parser.add_argument('--lambda_identity', type=float, default=15.0, 
+                       help='Identity loss weight')
     
     # Output
-    parser.add_argument('--weight_dir', default='./weights/cyclegan_2d_iguane')
-    parser.add_argument('--result_dir', default='./results/cyclegan_2d_iguane')
-    parser.add_argument('--log_dir', default='./logs/cyclegan_2d_iguane')
+    parser.add_argument('--weight_dir', default='./weights/cyclegan_2d')
+    parser.add_argument('--result_dir', default='./results/cyclegan_2d')
+    parser.add_argument('--log_dir', default='./logs/cyclegan_2d')
     parser.add_argument('--save_freq', type=int, default=25)
     
     # Hardware
     parser.add_argument('--gpu', default='0,1,2')
+    parser.add_argument('--multi_gpu_strategy', default='model_parallel', 
+                        choices=['model_parallel', 'single'])
     
     args = parser.parse_args()
     
     print("\n" + "="*80)
-    print("IGUANE-COMPLIANT CONFIGURATION")
+    print("CONFIGURATION")
     print("="*80)
     for arg, value in vars(args).items():
         print(f"  {arg}: {value}")
