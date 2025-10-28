@@ -570,13 +570,32 @@ class CycleGAN2D_MultiSite:
     def compile(self, lr_gen=0.0002, lr_disc=0.0001, beta_1=0.5):
         """Compile with separate optimizers for each discriminator"""
         
+        # Store learning rate parameters for later
+        self.lr_gen = lr_gen
+        self.lr_disc = lr_disc
+        self.beta_1 = beta_1
+        
+        # Generator optimizer
         self.gen_optimizer = Adam(learning_rate=lr_gen, beta_1=beta_1)
+        self.gen_optimizer.build(self.gen_site2BCH.trainable_variables)
         
+        # BCH discriminator optimizer
         self.disc_BCH_optimizer = Adam(learning_rate=lr_disc, beta_1=beta_1)
+        self.disc_BCH_optimizer.build(self.disc_BCH.trainable_variables)
         
+        # Site discriminator optimizers
         self.disc_site_optimizers = {}
         for site in self.target_sites:
-            self.disc_site_optimizers[site] = Adam(learning_rate=lr_disc, beta_1=beta_1)
+            opt = Adam(learning_rate=lr_disc, beta_1=beta_1)
+            opt.build(self.disc_sites[site].trainable_variables)
+            self.disc_site_optimizers[site] = opt
+        
+        # Also build optimizers for backward generators
+        self.gen_bwd_optimizers = {}
+        for site in self.target_sites:
+            opt = Adam(learning_rate=lr_gen, beta_1=beta_1)
+            opt.build(self.gen_BCH2site[site].trainable_variables)
+            self.gen_bwd_optimizers[site] = opt
         
         print("\nModel compiled:")
         print(f"  Gen site->BCH parameters: {self.gen_site2BCH.count_params():,}")
@@ -586,17 +605,11 @@ class CycleGAN2D_MultiSite:
             print(f"  Disc per-site parameters: {list(self.disc_sites.values())[0].count_params():,} x {len(self.target_sites)}")
         print(f"  Generator LR: {lr_gen}")
         print(f"  Discriminator LR: {lr_disc}")
-        print(f"  Created {1 + len(self.disc_site_optimizers)} discriminator optimizers")
+        print(f"  Total optimizers: 1 (fwd gen) + {len(self.gen_bwd_optimizers)} (bwd gen) + 1 (disc BCH) + {len(self.disc_site_optimizers)} (disc sites)")
     
     def train_step(self, site_batches):
         """
         IGUANe-style training with gradient accumulation
-        
-        Per step:
-        1. Iterate through sites in random order
-        2. Update discriminators for each site
-        3. Accumulate GenFwd gradients, update GenBwd_i immediately
-        4. After all sites: Update GenFwd once with accumulated gradients
         """
         
         # Shuffle sites for random order
@@ -628,7 +641,9 @@ class CycleGAN2D_MultiSite:
             fake_BCH = self.gen_site2BCH([real_site, ga_site], training=False)
             fake_site = gen_BCH2site_i([real_BCH, ga_BCH], training=False)
             
-            # Update BCH discriminator
+            # ============================================================
+            # UPDATE BCH DISCRIMINATOR
+            # ============================================================
             with tf.device(self.gpu_assignments['disc_BCH']):
                 with tf.GradientTape() as disc_BCH_tape:
                     disc_real_BCH = self.disc_BCH([real_BCH, ga_BCH], training=True)
@@ -637,9 +652,14 @@ class CycleGAN2D_MultiSite:
                 
                 disc_BCH_grads = disc_BCH_tape.gradient(disc_BCH_loss, self.disc_BCH.trainable_variables)
                 disc_BCH_grads, _ = tf.clip_by_global_norm(disc_BCH_grads, 5.0)
-                self.disc_BCH_optimizer.apply_gradients(zip(disc_BCH_grads, self.disc_BCH.trainable_variables))
+                
+                self.disc_BCH_optimizer.apply_gradients(
+                    zip(disc_BCH_grads, self.disc_BCH.trainable_variables)
+                )
             
-            # Update site discriminator
+            # ============================================================
+            # UPDATE SITE DISCRIMINATOR
+            # ============================================================
             with tf.GradientTape() as disc_site_tape:
                 disc_real_site = disc_site([real_site, ga_site], training=True)
                 disc_fake_site = disc_site([fake_site, ga_BCH], training=True)
@@ -647,9 +667,14 @@ class CycleGAN2D_MultiSite:
             
             disc_site_grads = disc_site_tape.gradient(disc_site_loss, disc_site.trainable_variables)
             disc_site_grads, _ = tf.clip_by_global_norm(disc_site_grads, 5.0)
-            self.disc_site_optimizers[site_name].apply_gradients(zip(disc_site_grads, disc_site.trainable_variables))
             
-            # Compute generator gradients
+            self.disc_site_optimizers[site_name].apply_gradients(
+                zip(disc_site_grads, disc_site.trainable_variables)
+            )
+            
+            # ============================================================
+            # COMPUTE GENERATOR GRADIENTS
+            # ============================================================
             with tf.device(self.gpu_assignments['generators']):
                 with tf.GradientTape(persistent=True) as gen_tape:
                     # Forward cycle
@@ -681,10 +706,12 @@ class CycleGAN2D_MultiSite:
                     identity_loss_total = identity_loss_BCH + identity_loss_site
                     
                     gen_loss = (gen_site2BCH_loss + gen_BCH2site_loss + 
-                               self.lambda_cycle * cycle_loss_total + 
-                               self.lambda_identity * identity_loss_total)
+                            self.lambda_cycle * cycle_loss_total + 
+                            self.lambda_identity * identity_loss_total)
                 
-                # Accumulate GenFwd gradients
+                # ============================================================
+                # ACCUMULATE FORWARD GENERATOR GRADIENTS
+                # ============================================================
                 gen_fwd_vars = self.gen_site2BCH.trainable_variables
                 gen_fwd_grads = gen_tape.gradient(gen_loss, gen_fwd_vars)
                 gen_fwd_grads, _ = tf.clip_by_global_norm(gen_fwd_grads, 5.0)
@@ -696,11 +723,16 @@ class CycleGAN2D_MultiSite:
                         ag + g for ag, g in zip(accumulated_gen_fwd_grads, gen_fwd_grads)
                     ]
                 
-                # Update GenBwd_i immediately
+                # ============================================================
+                # UPDATE BACKWARD GENERATOR IMMEDIATELY
+                # ============================================================
                 gen_bwd_vars = gen_BCH2site_i.trainable_variables
                 gen_bwd_grads = gen_tape.gradient(gen_loss, gen_bwd_vars)
                 gen_bwd_grads, _ = tf.clip_by_global_norm(gen_bwd_grads, 5.0)
-                self.gen_optimizer.apply_gradients(zip(gen_bwd_grads, gen_bwd_vars))
+                
+                self.gen_bwd_optimizers[site_name].apply_gradients(
+                    zip(gen_bwd_grads, gen_bwd_vars)
+                )
                 
                 del gen_tape
             
@@ -716,7 +748,9 @@ class CycleGAN2D_MultiSite:
             del fake_BCH, cycled_site, fake_site, cycled_BCH
             del identity_BCH, identity_site
         
-        # Update universal forward generator
+        # ============================================================
+        # UPDATE UNIVERSAL FORWARD GENERATOR (once per step)
+        # ============================================================
         if n_sites_processed > 0 and accumulated_gen_fwd_grads is not None:
             # Average accumulated gradients
             accumulated_gen_fwd_grads = [g / n_sites_processed for g in accumulated_gen_fwd_grads]
