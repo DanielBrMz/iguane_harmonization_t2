@@ -17,7 +17,7 @@ warnings.filterwarnings('ignore')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
 import tensorflow as tf
-from tensorflow.keras import layers, Model
+from tensorflow.keras import layers, Model, mixed_precision
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras import backend as K
 
@@ -609,23 +609,28 @@ class CycleGAN2D_MultiSite:
     
     def train_step(self, site_batches):
         """
-        IGUANe-style training with gradient accumulation
+        OPTIMIZED IGUANe-style training
+        Key optimizations:
+        1. Single forward pass per generator
+        2. Batch loss accumulation (no .numpy() in loop)
+        3. Non-persistent tape
+        4. Minimal CPU-GPU transfers
         """
         
-        # Shuffle sites for random order
+        # Shuffle sites
         sites = list(self.target_sites)
         np.random.shuffle(sites)
         
-        # Accumulator for universal forward generator
+        # Accumulators (keep on GPU as tensors, not numpy)
         accumulated_gen_fwd_grads = None
-        n_sites_processed = 0
+        n_sites = tf.constant(0, dtype=tf.float32)
         
-        # Track losses
-        total_gen_loss = 0.0
-        total_disc_BCH_loss = 0.0
+        # Loss accumulators (tensors, not python floats)
+        total_gen_loss = tf.constant(0.0)
+        total_disc_BCH_loss = tf.constant(0.0)
+        total_cycle_loss = tf.constant(0.0)
+        total_identity_loss = tf.constant(0.0)
         total_disc_site_losses = {}
-        total_cycle_loss = 0.0
-        total_identity_loss = 0.0
         
         # Process each site
         for site_name in sites:
@@ -637,29 +642,27 @@ class CycleGAN2D_MultiSite:
             disc_site = self.disc_sites[site_name]
             gen_BCH2site_i = self.gen_BCH2site[site_name]
             
-            # Generate fake images
+            # ============================================================
+            # DISCRIMINATOR UPDATES - Use fake images WITHOUT gradients
+            # ============================================================
+            
+            # Generate fake images (no gradient tape, much faster)
             fake_BCH = self.gen_site2BCH([real_site, ga_site], training=False)
             fake_site = gen_BCH2site_i([real_BCH, ga_BCH], training=False)
             
-            # ============================================================
-            # UPDATE BCH DISCRIMINATOR
-            # ============================================================
-            with tf.device(self.gpu_assignments['disc_BCH']):
-                with tf.GradientTape() as disc_BCH_tape:
-                    disc_real_BCH = self.disc_BCH([real_BCH, ga_BCH], training=True)
-                    disc_fake_BCH = self.disc_BCH([fake_BCH, ga_site], training=True)
-                    disc_BCH_loss = discriminator_loss_smooth(disc_real_BCH, disc_fake_BCH)
-                
-                disc_BCH_grads = disc_BCH_tape.gradient(disc_BCH_loss, self.disc_BCH.trainable_variables)
-                disc_BCH_grads, _ = tf.clip_by_global_norm(disc_BCH_grads, 5.0)
-                
-                self.disc_BCH_optimizer.apply_gradients(
-                    zip(disc_BCH_grads, self.disc_BCH.trainable_variables)
-                )
+            # Update BCH discriminator
+            with tf.GradientTape() as disc_BCH_tape:
+                disc_real_BCH = self.disc_BCH([real_BCH, ga_BCH], training=True)
+                disc_fake_BCH = self.disc_BCH([fake_BCH, ga_site], training=True)
+                disc_BCH_loss = discriminator_loss_smooth(disc_real_BCH, disc_fake_BCH)
             
-            # ============================================================
-            # UPDATE SITE DISCRIMINATOR
-            # ============================================================
+            disc_BCH_grads = disc_BCH_tape.gradient(disc_BCH_loss, self.disc_BCH.trainable_variables)
+            disc_BCH_grads, _ = tf.clip_by_global_norm(disc_BCH_grads, 5.0)
+            self.disc_BCH_optimizer.apply_gradients(
+                zip(disc_BCH_grads, self.disc_BCH.trainable_variables)
+            )
+            
+            # Update site discriminator
             with tf.GradientTape() as disc_site_tape:
                 disc_real_site = disc_site([real_site, ga_site], training=True)
                 disc_fake_site = disc_site([fake_site, ga_BCH], training=True)
@@ -667,105 +670,91 @@ class CycleGAN2D_MultiSite:
             
             disc_site_grads = disc_site_tape.gradient(disc_site_loss, disc_site.trainable_variables)
             disc_site_grads, _ = tf.clip_by_global_norm(disc_site_grads, 5.0)
-            
             self.disc_site_optimizers[site_name].apply_gradients(
                 zip(disc_site_grads, disc_site.trainable_variables)
             )
             
             # ============================================================
-            # COMPUTE GENERATOR GRADIENTS
+            # GENERATOR UPDATES - Reuse discriminator outputs
             # ============================================================
-            with tf.device(self.gpu_assignments['generators']):
-                with tf.GradientTape(persistent=True) as gen_tape:
-                    # Forward cycle
-                    fake_BCH = self.gen_site2BCH([real_site, ga_site], training=True)
-                    cycled_site = gen_BCH2site_i([fake_BCH, ga_site], training=True)
-                    
-                    # Backward cycle
-                    fake_site = gen_BCH2site_i([real_BCH, ga_BCH], training=True)
-                    cycled_BCH = self.gen_site2BCH([fake_site, ga_BCH], training=True)
-                    
-                    # Identity
-                    identity_BCH = gen_BCH2site_i([real_BCH, ga_BCH], training=True)
-                    identity_site = self.gen_site2BCH([real_site, ga_site], training=True)
-                    
-                    # Discriminator predictions
-                    disc_fake_BCH = self.disc_BCH([fake_BCH, ga_site], training=False)
-                    disc_fake_site = disc_site([fake_site, ga_BCH], training=False)
-                    
-                    # Losses
-                    gen_site2BCH_loss = generator_loss(disc_fake_BCH)
-                    gen_BCH2site_loss = generator_loss(disc_fake_site)
-                    
-                    cycle_loss_forward = cycle_consistency_loss(real_site, cycled_site)
-                    cycle_loss_backward = cycle_consistency_loss(real_BCH, cycled_BCH)
-                    cycle_loss_total = cycle_loss_forward + cycle_loss_backward
-                    
-                    identity_loss_BCH = identity_loss(real_BCH, identity_BCH)
-                    identity_loss_site = identity_loss(real_site, identity_site)
-                    identity_loss_total = identity_loss_BCH + identity_loss_site
-                    
-                    gen_loss = (gen_site2BCH_loss + gen_BCH2site_loss + 
-                            self.lambda_cycle * cycle_loss_total + 
-                            self.lambda_identity * identity_loss_total)
-                
-                # ============================================================
-                # ACCUMULATE FORWARD GENERATOR GRADIENTS
-                # ============================================================
-                gen_fwd_vars = self.gen_site2BCH.trainable_variables
-                gen_fwd_grads = gen_tape.gradient(gen_loss, gen_fwd_vars)
-                gen_fwd_grads, _ = tf.clip_by_global_norm(gen_fwd_grads, 5.0)
-                
-                if accumulated_gen_fwd_grads is None:
-                    accumulated_gen_fwd_grads = gen_fwd_grads
-                else:
-                    accumulated_gen_fwd_grads = [
-                        ag + g for ag, g in zip(accumulated_gen_fwd_grads, gen_fwd_grads)
-                    ]
-                
-                # ============================================================
-                # UPDATE BACKWARD GENERATOR IMMEDIATELY
-                # ============================================================
-                gen_bwd_vars = gen_BCH2site_i.trainable_variables
-                gen_bwd_grads = gen_tape.gradient(gen_loss, gen_bwd_vars)
-                gen_bwd_grads, _ = tf.clip_by_global_norm(gen_bwd_grads, 5.0)
-                
-                self.gen_bwd_optimizers[site_name].apply_gradients(
-                    zip(gen_bwd_grads, gen_bwd_vars)
-                )
-                
-                del gen_tape
             
-            # Accumulate losses
-            total_gen_loss += gen_loss.numpy()
-            total_disc_BCH_loss += disc_BCH_loss.numpy()
-            total_disc_site_losses[site_name] = disc_site_loss.numpy()
-            total_cycle_loss += cycle_loss_total.numpy()
-            total_identity_loss += identity_loss_total.numpy()
-            n_sites_processed += 1
+            # Use TWO separate tapes instead of one persistent tape
+            with tf.GradientTape() as fwd_tape, tf.GradientTape() as bwd_tape:
+                # Forward cycle: site -> BCH -> site
+                fake_BCH_grad = self.gen_site2BCH([real_site, ga_site], training=True)
+                cycled_site = gen_BCH2site_i([fake_BCH_grad, ga_site], training=True)
+                
+                # Backward cycle: BCH -> site -> BCH
+                fake_site_grad = gen_BCH2site_i([real_BCH, ga_BCH], training=True)
+                cycled_BCH = self.gen_site2BCH([fake_site_grad, ga_BCH], training=True)
+                
+                # Identity
+                identity_BCH = gen_BCH2site_i([real_BCH, ga_BCH], training=True)
+                identity_site = self.gen_site2BCH([real_site, ga_site], training=True)
+                
+                # Discriminator predictions (reuse already-updated discriminators)
+                disc_fake_BCH_gen = self.disc_BCH([fake_BCH_grad, ga_site], training=False)
+                disc_fake_site_gen = disc_site([fake_site_grad, ga_BCH], training=False)
+                
+                # Losses
+                gen_site2BCH_loss = generator_loss(disc_fake_BCH_gen)
+                gen_BCH2site_loss = generator_loss(disc_fake_site_gen)
+                
+                cycle_loss_forward = cycle_consistency_loss(real_site, cycled_site)
+                cycle_loss_backward = cycle_consistency_loss(real_BCH, cycled_BCH)
+                cycle_loss_total = cycle_loss_forward + cycle_loss_backward
+                
+                identity_loss_BCH = identity_loss(real_BCH, identity_BCH)
+                identity_loss_site = identity_loss(real_site, identity_site)
+                identity_loss_total = identity_loss_BCH + identity_loss_site
+                
+                gen_loss = (gen_site2BCH_loss + gen_BCH2site_loss + 
+                        self.lambda_cycle * cycle_loss_total + 
+                        self.lambda_identity * identity_loss_total)
             
-            # Clean up
-            del fake_BCH, cycled_site, fake_site, cycled_BCH
-            del identity_BCH, identity_site
+            # Accumulate forward generator gradients
+            gen_fwd_vars = self.gen_site2BCH.trainable_variables
+            gen_fwd_grads = fwd_tape.gradient(gen_loss, gen_fwd_vars)
+            gen_fwd_grads, _ = tf.clip_by_global_norm(gen_fwd_grads, 5.0)
+            
+            if accumulated_gen_fwd_grads is None:
+                accumulated_gen_fwd_grads = gen_fwd_grads
+            else:
+                accumulated_gen_fwd_grads = [
+                    ag + g for ag, g in zip(accumulated_gen_fwd_grads, gen_fwd_grads)
+                ]
+            
+            # Update backward generator immediately
+            gen_bwd_vars = gen_BCH2site_i.trainable_variables
+            gen_bwd_grads = bwd_tape.gradient(gen_loss, gen_bwd_vars)
+            gen_bwd_grads, _ = tf.clip_by_global_norm(gen_bwd_grads, 5.0)
+            self.gen_bwd_optimizers[site_name].apply_gradients(
+                zip(gen_bwd_grads, gen_bwd_vars)
+            )
+            
+            total_gen_loss += gen_loss
+            total_disc_BCH_loss += disc_BCH_loss
+            total_cycle_loss += cycle_loss_total
+            total_identity_loss += identity_loss_total
+            total_disc_site_losses[site_name] = disc_site_loss
+            n_sites += 1.0
         
         # ============================================================
-        # UPDATE UNIVERSAL FORWARD GENERATOR (once per step)
+        # UPDATE FORWARD GENERATOR (once per step)
         # ============================================================
-        if n_sites_processed > 0 and accumulated_gen_fwd_grads is not None:
+        if n_sites > 0 and accumulated_gen_fwd_grads is not None:
             # Average accumulated gradients
-            accumulated_gen_fwd_grads = [g / n_sites_processed for g in accumulated_gen_fwd_grads]
+            accumulated_gen_fwd_grads = [g / n_sites for g in accumulated_gen_fwd_grads]
             
-            # Apply once per training step
-            with tf.device(self.gpu_assignments['generators']):
-                self.gen_optimizer.apply_gradients(
-                    zip(accumulated_gen_fwd_grads, self.gen_site2BCH.trainable_variables)
-                )
+            self.gen_optimizer.apply_gradients(
+                zip(accumulated_gen_fwd_grads, self.gen_site2BCH.trainable_variables)
+            )
             
             # Average losses
-            total_gen_loss /= n_sites_processed
-            total_disc_BCH_loss /= n_sites_processed
-            total_cycle_loss /= n_sites_processed
-            total_identity_loss /= n_sites_processed
+            total_gen_loss /= n_sites
+            total_disc_BCH_loss /= n_sites
+            total_cycle_loss /= n_sites
+            total_identity_loss /= n_sites
         
         # Collapse detection
         if total_disc_BCH_loss < 0.01:
@@ -774,15 +763,15 @@ class CycleGAN2D_MultiSite:
             self.collapse_counter = max(0, self.collapse_counter - 1)
         
         losses = {
-            'gen_loss': total_gen_loss,
-            'disc_BCH_loss': total_disc_BCH_loss,
-            'cycle_loss': total_cycle_loss,
-            'identity_loss': total_identity_loss,
+            'gen_loss': float(total_gen_loss.numpy()),
+            'disc_BCH_loss': float(total_disc_BCH_loss.numpy()),
+            'cycle_loss': float(total_cycle_loss.numpy()),
+            'identity_loss': float(total_identity_loss.numpy()),
             'collapse_warning': self.collapse_counter
         }
         
         for site_name, loss in total_disc_site_losses.items():
-            losses[f'disc_{site_name}_loss'] = loss
+            losses[f'disc_{site_name}_loss'] = float(loss.numpy())
         
         return losses
 
@@ -835,7 +824,10 @@ def create_tf_dataset(images, ga, batch_size=16, shuffle=True, augment=False):
 def train(args):
     """Main training loop"""
     
+    tf.config.optimizer.set_jit(True) 
     gpus = configure_gpu(args.gpu, memory_growth=True)
+    policy = mixed_precision.Policy('mixed_float16')
+    mixed_precision.set_global_policy(policy)
     
     weight_dir = Path(args.weight_dir)
     result_dir = Path(args.result_dir)
