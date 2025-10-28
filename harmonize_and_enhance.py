@@ -368,7 +368,7 @@ def create_multi_subject_grid(subjects_data, save_path):
                         verticalalignment='center',
                         rotation=90)
     
-    plt.suptitle(f'Harmonization Pipeline - All Subjects', fontsize=16, fontweight='bold')
+    plt.suptitle(f' ', fontsize=16, fontweight='bold')
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
