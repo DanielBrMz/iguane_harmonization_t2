@@ -387,9 +387,9 @@ def process_test_data(test_data_path, model_weights_dir, output_dir,
         data = pickle.load(f)
     
     images = data['images']
-    sites = data['sites']
-    subject_ids = data['subject_ids']
-    ga = data['ga']
+    sites = data['site']
+    subject_ids = data['subject_id']
+    ga = data['gestational_age']
     
     print(f"Loaded {len(images)} test samples")
     print(f"Image shape: {images.shape}")
