@@ -17,7 +17,7 @@ warnings.filterwarnings('ignore')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
 import tensorflow as tf
-from tensorflow.keras import layers, Model, mixed_precision
+from tensorflow.keras import layers, Model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras import backend as K
 
@@ -826,8 +826,6 @@ def train(args):
     
     tf.config.optimizer.set_jit(True) 
     gpus = configure_gpu(args.gpu, memory_growth=True)
-    policy = mixed_precision.Policy('mixed_float16')
-    mixed_precision.set_global_policy(policy)
     
     weight_dir = Path(args.weight_dir)
     result_dir = Path(args.result_dir)
