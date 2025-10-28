@@ -670,47 +670,18 @@ def process_test_data(test_data_path, train_data_path, model_weights_dir, output
             ga_value = ga[idx].reshape(1, 1)
             subject_id = subject_ids[idx]
             
-            # Get corresponding BCH target
-            if len(bch_indices) > 0:
-                # Extract view from current subject's filename/ID
-                query_view = extract_view_from_subject_id(subject_ids[idx])
-                
-                # Find BCH samples with matching view
-                bch_matches = []
-                for bch_idx in bch_indices:
-                    bch_view = extract_view_from_subject_id(subject_ids[bch_idx])
-                    if bch_view == query_view:
-                        bch_matches.append(bch_idx)
-                
-                # If we found view matches, use one; otherwise fall back to any BCH
-                query_view = extract_view_from_subject_id(subject_ids[idx])
-                query_ga = ga[idx]
-
-                if bch_data is not None and len(bch_data['images']) > 0:
-                    # Use training set BCH samples
-                    bch_idx = find_best_bch_match(query_ga, query_view, bch_data, strategy=bch_match_strategy)
-                    if bch_idx is not None:
-                        target_bch = bch_data['images'][bch_idx, :, :, 0]
-                    else:
-                        target_bch = np.zeros_like(original)
-                elif len(bch_indices) > 0:
-                    # Fallback to test set BCH samples
-                    bch_matches = []
-                    for bch_idx in bch_indices:
-                        bch_view = extract_view_from_subject_id(subject_ids[bch_idx])
-                        if bch_view == query_view:
-                            bch_matches.append(bch_idx)
-                    
-                    if len(bch_matches) > 0:
-                        bch_idx = np.random.choice(bch_matches)
-                    else:
-                        bch_idx = np.random.choice(bch_indices)
-                    
-                    target_bch = images[bch_idx, :, :, 0]
+            # Extract query information for BCH matching
+            query_view = extract_view_from_subject_id(subject_ids[idx])
+            query_ga = ga[idx]
+            
+            # Get corresponding BCH target for visualization
+            if bch_data is not None and len(bch_data['images']) > 0:
+                # Use training set BCH samples with matching strategy
+                bch_idx = find_best_bch_match(query_ga, query_view, bch_data, strategy=bch_match_strategy)
+                if bch_idx is not None:
+                    target_bch = bch_data['images'][bch_idx, :, :, 0]
                 else:
                     target_bch = np.zeros_like(original)
-                
-                target_bch = images[bch_idx, :, :, 0]
             else:
                 target_bch = np.zeros_like(original)
             
@@ -767,25 +738,18 @@ def process_test_data(test_data_path, train_data_path, model_weights_dir, output
             ga_value = ga[idx].reshape(1, 1)
             subject_id = subject_ids[idx]
             
-            # Get corresponding BCH target
-            if len(bch_indices) > 0:
-                # Extract view from current subject's filename/ID
-                query_view = extract_view_from_subject_id(subject_ids[idx])
-                
-                # Find BCH samples with matching view
-                bch_matches = []
-                for bch_idx in bch_indices:
-                    bch_view = extract_view_from_subject_id(subject_ids[bch_idx])
-                    if bch_view == query_view:
-                        bch_matches.append(bch_idx)
-                
-                # If we found view matches, use one; otherwise fall back to any BCH
-                if len(bch_matches) > 0:
-                    bch_idx = np.random.choice(bch_matches)
+            # Extract query information for BCH matching
+            query_view = extract_view_from_subject_id(subject_ids[idx])
+            query_ga = ga[idx]
+            
+            # Get corresponding BCH target for visualization
+            if bch_data is not None and len(bch_data['images']) > 0:
+                # Use training set BCH samples with matching strategy
+                bch_idx = find_best_bch_match(query_ga, query_view, bch_data, strategy=bch_match_strategy)
+                if bch_idx is not None:
+                    target_bch = bch_data['images'][bch_idx, :, :, 0]
                 else:
-                    bch_idx = np.random.choice(bch_indices)
-                
-                target_bch = images[bch_idx, :, :, 0]
+                    target_bch = np.zeros_like(original)
             else:
                 target_bch = np.zeros_like(original)
             
