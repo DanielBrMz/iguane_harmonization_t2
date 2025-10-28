@@ -299,7 +299,7 @@ def create_multi_subject_grid(subjects_data, save_path):
         'original', 'target_bch', 'enhanced', 'brain_mask', 'site', 'subject_id', 'split'
     """
     n_subjects = len(subjects_data)
-    n_cols = 4  # Original, Target BCH, Enhanced, Brain Mask
+    n_cols = 4  # Original, Target BCH, Harmonized, Difference
     n_rows = n_subjects
     
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, 4 * n_rows))
@@ -316,6 +316,9 @@ def create_multi_subject_grid(subjects_data, save_path):
         subject_id = data['subject_id']
         split = data['split']
         
+        # Calculate difference map
+        difference = np.abs(original - enhanced)
+        
         # Calculate statistics
         orig_mean = original.mean()
         orig_std = original.std()
@@ -323,6 +326,14 @@ def create_multi_subject_grid(subjects_data, save_path):
         target_std = target_bch.std()
         enh_mean = enhanced.mean()
         enh_std = enhanced.std()
+        
+        # Calculate difference statistics in brain region only
+        if brain_mask.sum() > 0:
+            diff_mean = difference[brain_mask].mean()
+            diff_max = difference[brain_mask].max()
+        else:
+            diff_mean = difference.mean()
+            diff_max = difference.max()
         
         # Original
         axes[i, 0].imshow(original, cmap='gray', vmin=0, vmax=1)
@@ -334,14 +345,14 @@ def create_multi_subject_grid(subjects_data, save_path):
         axes[i, 1].set_title(f'Target BCH\nMean: {target_mean:.3f}, Std: {target_std:.3f}', fontsize=10)
         axes[i, 1].axis('off')
         
-        # Enhanced
+        # Harmonized
         axes[i, 2].imshow(enhanced, cmap='gray', vmin=0, vmax=1)
         axes[i, 2].set_title(f'Harmonized\nMean: {enh_mean:.3f}, Std: {enh_std:.3f}', fontsize=10)
         axes[i, 2].axis('off')
         
-        # Brain mask
-        axes[i, 3].imshow(brain_mask, cmap='gray')
-        axes[i, 3].set_title(f'Brain Mask\nPixels: {brain_mask.sum()}', fontsize=10)
+        # Difference map with blue-white-red colormap
+        im = axes[i, 3].imshow(difference, cmap='bwr', vmin=-0.3, vmax=0.3)
+        axes[i, 3].set_title(f'Difference\nMean: {diff_mean:.4f}, Max: {diff_max:.4f}', fontsize=10)
         axes[i, 3].axis('off')
         
         # Add row label
