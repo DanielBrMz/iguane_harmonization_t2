@@ -14,7 +14,7 @@ The goal: Harmonized images that look like the originals but with site-specific
 differences removed - NOT washed out!
 
 Usage:
-    python harmonize_and_enhance.py --model_weights weights/cyclegan_2d/ --test_data processed_data_4slice/test_4slice_data.pkl
+    python harmonize_and_enhance.py --model_weights weights/cyclegan_2d/ --test_data processed_data_4slice/test_4slice_data.pkl --validation_csv stackQC_50stacks.csv
 """
 
 import os
@@ -24,6 +24,7 @@ import sys
 import argparse
 import numpy as np
 import pickle
+import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -200,115 +201,89 @@ def enhance_contrast_clahe(image, brain_mask, clip_limit=0.03):
         return enhanced
     
     brain_region = image[brain_mask]
-    brain_min, brain_max = brain_region.min(), brain_region.max()
     
-    if brain_max - brain_min < 1e-6:
+    if brain_region.max() - brain_region.min() < 1e-6:
         return enhanced
     
-    # Normalize to [0, 1]
-    brain_normalized = (image - brain_min) / (brain_max - brain_min + 1e-8)
-    brain_normalized = np.clip(brain_normalized, 0, 1)
+    # Normalize to [0, 1] for CLAHE
+    brain_min = brain_region.min()
+    brain_max = brain_region.max()
+    brain_norm = (brain_region - brain_min) / (brain_max - brain_min + 1e-8)
     
     # Apply CLAHE
-    brain_uint8 = (brain_normalized * 255).astype(np.uint8)
-    enhanced_uint8 = exposure.equalize_adapthist(
-        brain_uint8, 
-        clip_limit=clip_limit,
-        nbins=256
-    )
+    brain_equalized = exposure.equalize_adapthist(
+        brain_norm.reshape(-1, 1), 
+        clip_limit=clip_limit
+    ).flatten()
     
-    # Convert back
-    enhanced_brain = enhanced_uint8 * (brain_max - brain_min) + brain_min
-    enhanced[brain_mask] = enhanced_brain[brain_mask]
+    # Rescale to original range
+    brain_enhanced = brain_equalized * (brain_max - brain_min) + brain_min
     
-    return enhanced
-
-
-def preserve_details(harmonized, original, brain_mask, alpha=0.25, sigma=1.5):
-    """
-    Add back high-frequency details from original
-    """
-    # Extract high-frequency component
-    original_smooth = gaussian_filter(original, sigma=sigma)
-    original_highfreq = original - original_smooth
-    
-    # Add to harmonized
-    enhanced = harmonized.copy()
-    enhanced[brain_mask] = (
-        harmonized[brain_mask] + alpha * original_highfreq[brain_mask]
-    )
-    
-    enhanced = np.clip(enhanced, 0, 1)
+    # Update only brain region
+    enhanced[brain_mask] = brain_enhanced
     
     return enhanced
 
 
-def match_contrast_statistics(harmonized, original, brain_mask):
+def preserve_high_frequency_details(original, harmonized, brain_mask, alpha=0.25):
     """
-    Match mean and std of harmonized to original (brain region only)
+    Preserve high-frequency details from original
     """
-    matched = harmonized.copy()
-    
     if brain_mask.sum() == 0:
-        return matched
+        return harmonized
     
-    harm_brain = harmonized[brain_mask]
-    orig_brain = original[brain_mask]
+    # Extract high-frequency details
+    sigma = 1.0
+    original_smooth = gaussian_filter(original, sigma=sigma)
+    harmonized_smooth = gaussian_filter(harmonized, sigma=sigma)
     
-    orig_mean = orig_brain.mean()
-    orig_std = orig_brain.std()
-    harm_mean = harm_brain.mean()
-    harm_std = harm_brain.std()
+    original_details = original - original_smooth
+    harmonized_details = harmonized - harmonized_smooth
     
-    if harm_std < 1e-6:
-        return matched
+    # Blend details
+    blended_details = alpha * original_details + (1 - alpha) * harmonized_details
     
-    # Standardize and rescale
-    matched_brain = (harm_brain - harm_mean) / harm_std
-    matched_brain = matched_brain * orig_std + orig_mean
-    matched_brain = np.clip(matched_brain, 0, 1)
+    # Add back to harmonized
+    enhanced = harmonized_smooth + blended_details
     
-    matched[brain_mask] = matched_brain
+    # Apply only to brain
+    result = harmonized.copy()
+    result[brain_mask] = enhanced[brain_mask]
     
-    return matched
+    return result
 
 
-def enhance_harmonized_image(harmonized, original, 
-                            clahe_clip=0.03,
-                            detail_alpha=0.25,
-                            detail_sigma=1.5,
-                            match_stats=True):
+def enhance_harmonized_image(original, harmonized, clahe_clip=0.03, detail_alpha=0.25):
     """
-    Complete enhancement pipeline to make harmonized look natural
-    
-    Args:
-        harmonized: raw harmonized output [0, 1]
-        original: original image [0, 1]
-        clahe_clip: CLAHE enhancement strength
-        detail_alpha: high-frequency detail weight
-        detail_sigma: Gaussian sigma for detail extraction
-        match_stats: match contrast statistics to original
-    
-    Returns:
-        enhanced: enhanced harmonized image [0, 1]
-        brain_mask: generated brain mask
+    Complete enhancement pipeline
     """
-    # Step 1: Generate brain mask from original
+    # Generate brain mask
     brain_mask = generate_brain_mask(original, method='adaptive')
     
-    # Step 2: CLAHE enhancement
+    # Step 1: Enhance contrast with CLAHE
     enhanced = enhance_contrast_clahe(harmonized, brain_mask, clip_limit=clahe_clip)
     
-    # Step 3: Preserve high-frequency details
-    enhanced = preserve_details(enhanced, original, brain_mask, 
-                               alpha=detail_alpha, sigma=detail_sigma)
+    # Step 2: Preserve high-frequency details
+    enhanced = preserve_high_frequency_details(original, enhanced, brain_mask, alpha=detail_alpha)
     
-    # Step 4: Match contrast statistics
-    if match_stats:
-        enhanced = match_contrast_statistics(enhanced, original, brain_mask)
+    # Step 3: Match intensity statistics to original
+    if brain_mask.sum() > 0:
+        original_brain = original[brain_mask]
+        enhanced_brain = enhanced[brain_mask]
+        
+        # Match mean and std
+        orig_mean = original_brain.mean()
+        orig_std = original_brain.std()
+        enh_mean = enhanced_brain.mean()
+        enh_std = enhanced_brain.std()
+        
+        if enh_std > 1e-6:
+            enhanced_brain = (enhanced_brain - enh_mean) / enh_std
+            enhanced_brain = enhanced_brain * orig_std + orig_mean
+            enhanced[brain_mask] = enhanced_brain
     
-    # Step 5: Ensure background is zero
-    enhanced[~brain_mask] = 0
+    # Clip to [0, 1]
+    enhanced = np.clip(enhanced, 0, 1)
     
     return enhanced, brain_mask
 
@@ -317,101 +292,92 @@ def enhance_harmonized_image(harmonized, original,
 # VISUALIZATION
 # ============================================================================
 
-def create_comparison_figure(original, raw_harmonized, enhanced_harmonized, 
-                            brain_mask, site_name, subject_id, save_path=None):
+def create_multi_subject_grid(subjects_data, save_path):
     """
-    Create comprehensive comparison figure
+    Create a grid showing all subjects in a single image
+    subjects_data: list of dicts with keys: 
+        'original', 'target_bch', 'enhanced', 'brain_mask', 'site', 'subject_id', 'split'
     """
-    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+    n_subjects = len(subjects_data)
+    n_cols = 4  # Original, Target BCH, Enhanced, Brain Mask
+    n_rows = n_subjects
     
-    # Row 1: Images
-    axes[0, 0].imshow(original, cmap='gray', vmin=0, vmax=1)
-    axes[0, 0].set_title(f'Original ({site_name})\nMean: {original[brain_mask].mean():.3f}, Std: {original[brain_mask].std():.3f}')
-    axes[0, 0].axis('off')
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, 4 * n_rows))
     
-    axes[0, 1].imshow(raw_harmonized, cmap='gray', vmin=0, vmax=1)
-    axes[0, 1].set_title(f'Harmonized (Raw)\nMean: {raw_harmonized[brain_mask].mean():.3f}, Std: {raw_harmonized[brain_mask].std():.3f}')
-    axes[0, 1].axis('off')
+    if n_rows == 1:
+        axes = axes.reshape(1, -1)
     
-    axes[0, 2].imshow(enhanced_harmonized, cmap='gray', vmin=0, vmax=1)
-    axes[0, 2].set_title(f'Harmonized (Enhanced)\nMean: {enhanced_harmonized[brain_mask].mean():.3f}, Std: {enhanced_harmonized[brain_mask].std():.3f}')
-    axes[0, 2].axis('off')
+    for i, data in enumerate(subjects_data):
+        original = data['original']
+        target_bch = data['target_bch']
+        enhanced = data['enhanced']
+        brain_mask = data['brain_mask']
+        site = data['site']
+        subject_id = data['subject_id']
+        split = data['split']
+        
+        # Calculate statistics
+        orig_mean = original.mean()
+        orig_std = original.std()
+        target_mean = target_bch.mean()
+        target_std = target_bch.std()
+        enh_mean = enhanced.mean()
+        enh_std = enhanced.std()
+        
+        # Original
+        axes[i, 0].imshow(original, cmap='gray', vmin=0, vmax=1)
+        axes[i, 0].set_title(f'Original ({site})\nMean: {orig_mean:.3f}, Std: {orig_std:.3f}', fontsize=10)
+        axes[i, 0].axis('off')
+        
+        # Target BCH
+        axes[i, 1].imshow(target_bch, cmap='gray', vmin=0, vmax=1)
+        axes[i, 1].set_title(f'Target BCH\nMean: {target_mean:.3f}, Std: {target_std:.3f}', fontsize=10)
+        axes[i, 1].axis('off')
+        
+        # Enhanced
+        axes[i, 2].imshow(enhanced, cmap='gray', vmin=0, vmax=1)
+        axes[i, 2].set_title(f'Harmonized\nMean: {enh_mean:.3f}, Std: {enh_std:.3f}', fontsize=10)
+        axes[i, 2].axis('off')
+        
+        # Brain mask
+        axes[i, 3].imshow(brain_mask, cmap='gray')
+        axes[i, 3].set_title(f'Brain Mask\nPixels: {brain_mask.sum()}', fontsize=10)
+        axes[i, 3].axis('off')
+        
+        # Add row label
+        axes[i, 0].text(-0.1, 0.5, f'Subject {subject_id}\n({split})', 
+                        transform=axes[i, 0].transAxes,
+                        fontsize=12, fontweight='bold',
+                        verticalalignment='center',
+                        rotation=90)
     
-    axes[0, 3].imshow(brain_mask, cmap='gray')
-    axes[0, 3].set_title(f'Brain Mask\nPixels: {brain_mask.sum()}')
-    axes[0, 3].axis('off')
-    
-    # Row 2: Difference maps
-    diff_orig_raw = np.abs(original - raw_harmonized)
-    im1 = axes[1, 0].imshow(diff_orig_raw, cmap='hot', vmin=0, vmax=0.3)
-    axes[1, 0].set_title(f'|Original - Raw|\nMAE: {diff_orig_raw[brain_mask].mean():.4f}')
-    axes[1, 0].axis('off')
-    plt.colorbar(im1, ax=axes[1, 0], fraction=0.046)
-    
-    diff_orig_enh = np.abs(original - enhanced_harmonized)
-    im2 = axes[1, 1].imshow(diff_orig_enh, cmap='hot', vmin=0, vmax=0.3)
-    axes[1, 1].set_title(f'|Original - Enhanced|\nMAE: {diff_orig_enh[brain_mask].mean():.4f}')
-    axes[1, 1].axis('off')
-    plt.colorbar(im2, ax=axes[1, 1], fraction=0.046)
-    
-    # Histograms
-    bins = np.linspace(0, 1, 50)
-    axes[1, 2].hist(original[brain_mask], bins=bins, alpha=0.5, label='Original', density=True)
-    axes[1, 2].hist(raw_harmonized[brain_mask], bins=bins, alpha=0.5, label='Raw', density=True)
-    axes[1, 2].hist(enhanced_harmonized[brain_mask], bins=bins, alpha=0.5, label='Enhanced', density=True)
-    axes[1, 2].set_xlabel('Intensity')
-    axes[1, 2].set_ylabel('Density')
-    axes[1, 2].set_title('Intensity Distribution (Brain)')
-    axes[1, 2].legend()
-    axes[1, 2].grid(True, alpha=0.3)
-    
-    # Central profile
-    center_row = original.shape[0] // 2
-    axes[1, 3].plot(original[center_row, :], label='Original', linewidth=2, alpha=0.7)
-    axes[1, 3].plot(raw_harmonized[center_row, :], label='Raw', linewidth=2, alpha=0.7)
-    axes[1, 3].plot(enhanced_harmonized[center_row, :], label='Enhanced', linewidth=2, alpha=0.7)
-    axes[1, 3].set_xlabel('Column')
-    axes[1, 3].set_ylabel('Intensity')
-    axes[1, 3].set_title(f'Central Profile (Row {center_row})')
-    axes[1, 3].legend()
-    axes[1, 3].grid(True, alpha=0.3)
-    
-    plt.suptitle(f'Harmonization Pipeline - Subject {subject_id}', fontsize=16, fontweight='bold')
+    plt.suptitle(f'Harmonization Pipeline - All Subjects', fontsize=16, fontweight='bold')
     plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
     
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
-    
-    return fig
+    print(f"Multi-subject grid saved: {save_path}")
 
 
 # ============================================================================
 # MAIN PROCESSING
 # ============================================================================
 
-def process_test_data(test_data_path, model_weights_dir, output_dir,
-                     clahe_clip=0.03, detail_alpha=0.25, n_samples_per_site=10):
+def process_test_data(test_data_path, model_weights_dir, output_dir, 
+                     validation_csv_path=None,
+                     clahe_clip=0.03, detail_alpha=0.25, 
+                     n_samples_per_site=10):
     """
     Complete processing pipeline
-    
-    Args:
-        test_data_path: path to test_4slice_data.pkl
-        model_weights_dir: directory with model weights
-        output_dir: output directory for results
-        clahe_clip: CLAHE enhancement strength
-        detail_alpha: detail preservation weight
-        n_samples_per_site: number of samples to process per site
     """
     
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create subdirectories
     (output_dir / 'raw_harmonized').mkdir(exist_ok=True)
     (output_dir / 'enhanced_harmonized').mkdir(exist_ok=True)
-    (output_dir / 'comparison_figures').mkdir(exist_ok=True)
     (output_dir / 'brain_masks').mkdir(exist_ok=True)
+    (output_dir / 'comparison_figures').mkdir(exist_ok=True)
     
     print("\n" + "="*80)
     print("STEP 1: LOADING DATA")
@@ -421,19 +387,27 @@ def process_test_data(test_data_path, model_weights_dir, output_dir,
         data = pickle.load(f)
     
     images = data['images']
-    if images.max() > 1.0:
-        images = images / 255.0
+    sites = data['sites']
+    subject_ids = data['subject_ids']
+    ga = data['ga']
     
-    ga = data['gestational_age']
-    sites = data['site']
-    subject_ids = data.get('subject_id', np.arange(len(images)))
-    
-    print(f"Loaded {len(images)} test images")
+    print(f"Loaded {len(images)} test samples")
+    print(f"Image shape: {images.shape}")
     print(f"Sites: {np.unique(sites)}")
     
-    # Replace NaN GA values
+    # Handle NaN GA values
     ga_mean = np.nanmean(ga)
     ga = np.where(np.isnan(ga), ga_mean, ga)
+    
+    # Load validation subjects if provided
+    validation_subjects = []
+    validation_data = {}
+    if validation_csv_path and Path(validation_csv_path).exists():
+        print(f"\nLoading validation subjects from {validation_csv_path}")
+        val_df = pd.read_csv(validation_csv_path)
+        validation_subjects = val_df['file'].astype(int).tolist()
+        validation_data = {int(row['file']): row['Site'] for _, row in val_df.iterrows()}
+        print(f"Found {len(validation_subjects)} validation subjects")
     
     print("\n" + "="*80)
     print("STEP 2: LOADING MODEL")
@@ -460,7 +434,7 @@ def process_test_data(test_data_path, model_weights_dir, output_dir,
         print(f"Using final weights: {weight_file.name}")
     
     generator.load_weights(str(weight_file))
-    print("✓ Model loaded successfully")
+    print("Model loaded successfully")
     
     print("\n" + "="*80)
     print("STEP 3: PROCESSING IMAGES")
@@ -471,72 +445,151 @@ def process_test_data(test_data_path, model_weights_dir, output_dir,
     print(f"  Samples per site: {n_samples_per_site}")
     print("="*80)
     
-    # Get unique sites
-    unique_sites = np.unique(sites)
+    # Separate test and validation subjects
+    test_mask = np.array([sid not in validation_subjects for sid in subject_ids])
+    val_mask = np.array([sid in validation_subjects for sid in subject_ids])
     
-    # Process samples from each site
+    # Get BCH samples for target visualization
+    bch_mask = sites == 'BCH'
+    bch_indices = np.where(bch_mask)[0]
+    
+    # Process by site
+    unique_sites = np.unique(sites)
+    all_subjects_data = []
     all_results = []
     
     for site in unique_sites:
+        if site == 'BCH':
+            continue  # Skip BCH as it's the target
+            
         print(f"\n--- Processing site: {site} ---")
         
-        # Get indices for this site
-        site_indices = np.where(sites == site)[0]
+        # Get test samples for this site
+        site_test_mask = (sites == site) & test_mask
+        site_test_indices = np.where(site_test_mask)[0]
         
-        if len(site_indices) == 0:
-            print(f"  No samples found for {site}")
-            continue
+        # Get validation samples for this site
+        site_val_mask = (sites == site) & val_mask
+        site_val_indices = np.where(site_val_mask)[0]
         
-        # Select random samples
-        if len(site_indices) > n_samples_per_site:
-            selected_indices = np.random.choice(site_indices, n_samples_per_site, replace=False)
+        # Select samples
+        if len(site_test_indices) > n_samples_per_site:
+            selected_test = np.random.choice(site_test_indices, n_samples_per_site, replace=False)
         else:
-            selected_indices = site_indices
+            selected_test = site_test_indices
         
-        print(f"  Processing {len(selected_indices)} samples")
+        selected_val = site_val_indices
         
-        for idx in tqdm(selected_indices, desc=f"  {site}"):
+        print(f"  Test samples: {len(selected_test)}")
+        print(f"  Validation samples: {len(selected_val)}")
+        
+        # Process test samples
+        for idx in tqdm(selected_test, desc=f"  Test {site}"):
             original = images[idx, :, :, 0]
             ga_value = ga[idx].reshape(1, 1)
             subject_id = subject_ids[idx]
             
-            # Step A: Harmonize with CycleGAN
+            # Get corresponding BCH target
+            if len(bch_indices) > 0:
+                bch_idx = np.random.choice(bch_indices)
+                target_bch = images[bch_idx, :, :, 0]
+            else:
+                target_bch = np.zeros_like(original)
+            
+            # Harmonize
             img_batch = np.expand_dims(images[idx], axis=0)
             raw_harmonized = generator([img_batch, ga_value], training=False).numpy()[0, :, :, 0]
             
-            # Step B: Enhance post-processing
+            # Enhance
             enhanced_harmonized, brain_mask = enhance_harmonized_image(
-                raw_harmonized, 
-                original,
-                clahe_clip=clahe_clip,
-                detail_alpha=detail_alpha,
-                detail_sigma=1.5,
-                match_stats=True
+                original, raw_harmonized, 
+                clahe_clip=clahe_clip, 
+                detail_alpha=detail_alpha
             )
             
             # Save outputs
-            filename_base = f"{site}_{subject_id}_idx{idx}"
-            
+            filename_base = f'{site}_{subject_id}'
             np.save(output_dir / 'raw_harmonized' / f'{filename_base}_raw.npy', raw_harmonized)
             np.save(output_dir / 'enhanced_harmonized' / f'{filename_base}_enhanced.npy', enhanced_harmonized)
             np.save(output_dir / 'brain_masks' / f'{filename_base}_mask.npy', brain_mask)
             
-            # Create comparison figure
-            fig = create_comparison_figure(
-                original, 
-                raw_harmonized, 
-                enhanced_harmonized,
-                brain_mask,
-                site,
-                subject_id,
-                save_path=output_dir / 'comparison_figures' / f'{filename_base}_comparison.png'
-            )
+            # Store for grid
+            all_subjects_data.append({
+                'original': original,
+                'target_bch': target_bch,
+                'enhanced': enhanced_harmonized,
+                'brain_mask': brain_mask,
+                'site': site,
+                'subject_id': subject_id,
+                'split': 'Test'
+            })
             
-            # Store results
+            # Store metrics
             if brain_mask.sum() > 0:
                 result = {
                     'site': site,
                     'subject_id': subject_id,
+                    'split': 'Test',
+                    'idx': idx,
+                    'original_mean': original[brain_mask].mean(),
+                    'original_std': original[brain_mask].std(),
+                    'raw_mean': raw_harmonized[brain_mask].mean(),
+                    'raw_std': raw_harmonized[brain_mask].std(),
+                    'enhanced_mean': enhanced_harmonized[brain_mask].mean(),
+                    'enhanced_std': enhanced_harmonized[brain_mask].std(),
+                    'contrast_improvement': enhanced_harmonized[brain_mask].std() / (raw_harmonized[brain_mask].std() + 1e-8),
+                    'mae_raw': np.abs(original - raw_harmonized)[brain_mask].mean(),
+                    'mae_enhanced': np.abs(original - enhanced_harmonized)[brain_mask].mean()
+                }
+                all_results.append(result)
+        
+        # Process validation samples
+        for idx in tqdm(selected_val, desc=f"  Validation {site}"):
+            original = images[idx, :, :, 0]
+            ga_value = ga[idx].reshape(1, 1)
+            subject_id = subject_ids[idx]
+            
+            # Get corresponding BCH target
+            if len(bch_indices) > 0:
+                bch_idx = np.random.choice(bch_indices)
+                target_bch = images[bch_idx, :, :, 0]
+            else:
+                target_bch = np.zeros_like(original)
+            
+            # Harmonize
+            img_batch = np.expand_dims(images[idx], axis=0)
+            raw_harmonized = generator([img_batch, ga_value], training=False).numpy()[0, :, :, 0]
+            
+            # Enhance
+            enhanced_harmonized, brain_mask = enhance_harmonized_image(
+                original, raw_harmonized, 
+                clahe_clip=clahe_clip, 
+                detail_alpha=detail_alpha
+            )
+            
+            # Save outputs
+            filename_base = f'{site}_{subject_id}_val'
+            np.save(output_dir / 'raw_harmonized' / f'{filename_base}_raw.npy', raw_harmonized)
+            np.save(output_dir / 'enhanced_harmonized' / f'{filename_base}_enhanced.npy', enhanced_harmonized)
+            np.save(output_dir / 'brain_masks' / f'{filename_base}_mask.npy', brain_mask)
+            
+            # Store for grid
+            all_subjects_data.append({
+                'original': original,
+                'target_bch': target_bch,
+                'enhanced': enhanced_harmonized,
+                'brain_mask': brain_mask,
+                'site': site,
+                'subject_id': subject_id,
+                'split': 'Validation'
+            })
+            
+            # Store metrics
+            if brain_mask.sum() > 0:
+                result = {
+                    'site': site,
+                    'subject_id': subject_id,
+                    'split': 'Validation',
                     'idx': idx,
                     'original_mean': original[brain_mask].mean(),
                     'original_std': original[brain_mask].std(),
@@ -551,17 +604,29 @@ def process_test_data(test_data_path, model_weights_dir, output_dir,
                 all_results.append(result)
     
     print("\n" + "="*80)
-    print("STEP 4: CREATING SUMMARY")
+    print("STEP 4: CREATING VISUALIZATIONS")
+    print("="*80)
+    
+    # Create multi-subject grid
+    if all_subjects_data:
+        create_multi_subject_grid(
+            all_subjects_data,
+            save_path=output_dir / 'comparison_figures' / 'all_subjects_grid.png'
+        )
+    
+    print("\n" + "="*80)
+    print("STEP 5: CREATING SUMMARY")
     print("="*80)
     
     if all_results:
         # Create summary DataFrame
-        import pandas as pd
         results_df = pd.DataFrame(all_results)
         results_df.to_csv(output_dir / 'enhancement_summary.csv', index=False)
         
         print("\nOverall Statistics:")
         print(f"  Processed: {len(results_df)} images")
+        print(f"  Test: {len(results_df[results_df['split']=='Test'])}")
+        print(f"  Validation: {len(results_df[results_df['split']=='Validation'])}")
         print(f"\nContrast (Std):")
         print(f"  Original:  {results_df['original_std'].mean():.4f} ± {results_df['original_std'].std():.4f}")
         print(f"  Raw:       {results_df['raw_std'].mean():.4f} ± {results_df['raw_std'].std():.4f}")
@@ -578,7 +643,7 @@ def process_test_data(test_data_path, model_weights_dir, output_dir,
         for site in results_df['site'].unique():
             site_df = results_df[results_df['site'] == site]
             print(f"\n  {site}:")
-            print(f"    Samples: {len(site_df)}")
+            print(f"    Samples: {len(site_df)} (Test: {len(site_df[site_df['split']=='Test'])}, Val: {len(site_df[site_df['split']=='Validation'])})")
             print(f"    Contrast improvement: {site_df['contrast_improvement'].mean():.2f}x")
             print(f"    Enhanced std: {site_df['enhanced_std'].mean():.4f}")
         
@@ -645,10 +710,10 @@ def process_test_data(test_data_path, model_weights_dir, output_dir,
         plt.savefig(output_dir / 'summary_statistics.png', dpi=150, bbox_inches='tight')
         plt.close()
         
-        print(f"\n✓ Summary visualization saved: {output_dir / 'summary_statistics.png'}")
+        print(f"\nSummary visualization saved: {output_dir / 'summary_statistics.png'}")
     
     print("\n" + "="*80)
-    print("✓ PROCESSING COMPLETE!")
+    print("PROCESSING COMPLETE!")
     print("="*80)
     print(f"\nOutputs saved to: {output_dir}")
     print(f"  - Raw harmonized: {output_dir / 'raw_harmonized'}")
@@ -669,12 +734,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example usage:
-  python harmonize_and_enhance.py \\
-      --test_data processed_data_4slice/test_4slice_data.pkl \\
-      --model_weights weights/cyclegan_2d/ \\
-      --output harmonized_results/ \\
-      --n_samples 10 \\
-      --clahe_clip 0.03 \\
+  python harmonize_and_enhance.py \
+      --test_data processed_data_4slice/test_4slice_data.pkl \
+      --model_weights weights/cyclegan_2d/ \
+      --output harmonized_results/ \
+      --validation_csv stackQC_50stacks.csv \
+      --n_samples 10 \
+      --clahe_clip 0.03 \
       --detail_alpha 0.25
         """
     )
@@ -685,6 +751,8 @@ Example usage:
                        help='Directory with model weights')
     parser.add_argument('--output', default='./harmonized_results',
                        help='Output directory')
+    parser.add_argument('--validation_csv', default=None,
+                       help='Path to CSV with validation subjects')
     parser.add_argument('--n_samples', type=int, default=10,
                        help='Number of samples per site to process')
     parser.add_argument('--clahe_clip', type=float, default=0.03,
@@ -706,6 +774,7 @@ Example usage:
     print(f"Test data: {args.test_data}")
     print(f"Model weights: {args.model_weights}")
     print(f"Output: {args.output}")
+    print(f"Validation CSV: {args.validation_csv}")
     print(f"Samples per site: {args.n_samples}")
     print(f"CLAHE clip: {args.clahe_clip}")
     print(f"Detail alpha: {args.detail_alpha}")
@@ -717,6 +786,7 @@ Example usage:
         args.test_data,
         args.model_weights,
         args.output,
+        validation_csv_path=args.validation_csv,
         clahe_clip=args.clahe_clip,
         detail_alpha=args.detail_alpha,
         n_samples_per_site=args.n_samples
