@@ -22,7 +22,8 @@ nohup python3 train_fetal_2d_cyclegan.py \
     --reference_site BCH_CHD \
     --epochs 200 \
     --batch_size 16 \
-    --lr 0.0002 \
+    --lr_gen 0.0002 \
+    --lr_disc 0.0001 \
     --lambda_cycle 30.0 \
     --lambda_identity 15.0 \
     --save_freq 25 \
