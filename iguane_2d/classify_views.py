@@ -90,7 +90,6 @@ def extract_view_features(image_2d):
     edge_anisotropy = abs(edges_horizontal - edges_vertical) / (edges_horizontal + edges_vertical + 1e-8)
     
     # Feature 9-10: Shape moments
-    from scipy import ndimage
     moments = ndimage.moments(brain_mask.astype(float), order=2)
     mu20 = moments[2, 0] / (moments[0, 0] + 1e-8) - (moments[1, 0] / (moments[0, 0] + 1e-8))**2
     mu02 = moments[0, 2] / (moments[0, 0] + 1e-8) - (moments[0, 1] / (moments[0, 0] + 1e-8))**2
