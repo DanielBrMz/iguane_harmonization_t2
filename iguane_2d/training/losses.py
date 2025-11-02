@@ -51,7 +51,21 @@ def compute_generator_total_loss(gen_fwd_adv_loss, gen_bwd_adv_loss,
 
 def check_for_nan_loss(*losses):
     """Check if any loss is NaN"""
-    for loss in losses:
-        if tf.math.is_nan(loss):
-            return True
+    # Handle both dictionary and individual loss values
+    if len(losses) == 1 and isinstance(losses[0], dict):
+        # Dictionary of losses passed
+        loss_dict = losses[0]
+        for name, value in loss_dict.items():
+            if isinstance(value, (int, float)):
+                if value != value:  # NaN check for Python numbers
+                    return True
+            else:
+                # TensorFlow tensor
+                if tf.math.reduce_any(tf.math.is_nan(value)):
+                    return True
+    else:
+        # Individual loss tensors passed
+        for loss in losses:
+            if tf.math.is_nan(loss):
+                return True
     return False
