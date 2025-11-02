@@ -201,9 +201,14 @@ class CycleGAN2D_MultiSite:
         Returns:
             Dictionary of loss values
         """
-        # Shuffle site order
+        # Shuffle site order and sample subset for faster training
         sites = list(self.target_sites)
         np.random.shuffle(sites)
+        
+        # Sample only 2 sites per step (2.5x speedup)
+        # Over many iterations, all sites still get trained equally
+        # To train on all sites every step, comment out the next line
+        sites = sites[:2]
         
         # Initialize accumulators (keep as tensors on GPU)
         accumulated_gen_fwd_grads = None
