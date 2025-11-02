@@ -89,12 +89,21 @@ def extract_view_features(image_2d):
     edge_ratio = edges_horizontal / (edges_vertical + 1e-8)
     edge_anisotropy = abs(edges_horizontal - edges_vertical) / (edges_horizontal + edges_vertical + 1e-8)
     
-    # Feature 9-10: Shape moments
-    moments = ndimage.moments(brain_mask.astype(float), order=2)
-    mu20 = moments[2, 0] / (moments[0, 0] + 1e-8) - (moments[1, 0] / (moments[0, 0] + 1e-8))**2
-    mu02 = moments[0, 2] / (moments[0, 0] + 1e-8) - (moments[0, 1] / (moments[0, 0] + 1e-8))**2
-    orientation = 0.5 * np.arctan2(2 * moments[1, 1], mu20 - mu02)
-    eccentricity = np.sqrt(1 - min(mu20, mu02) / (max(mu20, mu02) + 1e-8))
+    # Feature 9-10: Shape moments (computed manually)
+    y_coords, x_coords = np.nonzero(brain_mask)
+    if len(y_coords) > 0:
+        # Central moments
+        y_mean = y_coords.mean()
+        x_mean = x_coords.mean()
+        mu20 = np.mean((y_coords - y_mean)**2)
+        mu02 = np.mean((x_coords - x_mean)**2)
+        mu11 = np.mean((y_coords - y_mean) * (x_coords - x_mean))
+        
+        orientation = 0.5 * np.arctan2(2 * mu11, mu20 - mu02)
+        eccentricity = np.sqrt(1 - min(mu20, mu02) / (max(mu20, mu02) + 1e-8))
+    else:
+        orientation = 0
+        eccentricity = 0
     
     # Feature 11-12: Intensity distribution shape
     brain_intensities = image_2d[brain_mask]
