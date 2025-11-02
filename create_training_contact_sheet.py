@@ -27,7 +27,11 @@ def create_full_training_contact_sheet(data_path, output_path='training_data_con
     
     images = data['images']
     sites = data['site']
-    ga = data['ga']
+    ga = data.get('gestational_age', data.get('ga', None))
+    
+    if ga is None:
+        print("Warning: No gestational age data found")
+        ga = np.zeros(len(images))
     
     print(f"Total images: {len(images)}")
     print(f"Sites: {np.unique(sites)}")
