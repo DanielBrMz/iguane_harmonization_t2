@@ -10,8 +10,8 @@ from typing import Dict, List
 
 from models import build_2d_generator, build_2d_discriminator
 from losses import (
-    discriminator_loss_smooth,
-    generator_loss,
+    discriminator_loss_mse,
+    generator_loss_mse,
     cycle_consistency_loss,
     identity_loss
 )
@@ -292,7 +292,7 @@ class CycleGAN2D_MultiSite:
         with tf.GradientTape() as disc_BCH_tape:
             disc_real_BCH = self.disc_BCH([real_BCH, ga_BCH], training=True)
             disc_fake_BCH = self.disc_BCH([fake_BCH, ga_site], training=True)
-            disc_BCH_loss = discriminator_loss_smooth(disc_real_BCH, disc_fake_BCH)
+            disc_BCH_loss = discriminator_loss_mse(disc_real_BCH, disc_fake_BCH)
         
         disc_BCH_grads = disc_BCH_tape.gradient(
             disc_BCH_loss, self.disc_BCH.trainable_variables
@@ -306,7 +306,7 @@ class CycleGAN2D_MultiSite:
         with tf.GradientTape() as disc_site_tape:
             disc_real_site = disc_site([real_site, ga_site], training=True)
             disc_fake_site = disc_site([fake_site, ga_BCH], training=True)
-            disc_site_loss = discriminator_loss_smooth(disc_real_site, disc_fake_site)
+            disc_site_loss = discriminator_loss_mse(disc_real_site, disc_fake_site)
         
         disc_site_grads = disc_site_tape.gradient(
             disc_site_loss, disc_site.trainable_variables
@@ -340,8 +340,8 @@ class CycleGAN2D_MultiSite:
             disc_fake_site = disc_site([fake_site, ga_BCH], training=False)
             
             # Compute losses
-            gen_site2BCH_loss = generator_loss(disc_fake_BCH)
-            gen_BCH2site_loss = generator_loss(disc_fake_site)
+            gen_site2BCH_loss = generator_loss_mse(disc_fake_BCH)
+            gen_BCH2site_loss = generator_loss_mse(disc_fake_site)
             
             cycle_loss_fwd = cycle_consistency_loss(real_site, cycled_site)
             cycle_loss_bwd = cycle_consistency_loss(real_BCH, cycled_BCH)
@@ -353,7 +353,7 @@ class CycleGAN2D_MultiSite:
             
             gen_loss = (gen_site2BCH_loss + gen_BCH2site_loss +
                        self.lambda_cycle * cycle_loss +
-                       self.lambda_identity * identity_loss_total)
+                       self.lambda_identity * self.lambda_cycle * identity_loss_total)
         
         # Compute and clip forward generator gradients (don't apply yet)
         gen_fwd_vars = self.gen_site2BCH.trainable_variables

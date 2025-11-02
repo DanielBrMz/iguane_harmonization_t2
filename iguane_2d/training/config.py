@@ -28,10 +28,10 @@ class TrainingConfig:
     epochs: int = 200
     batch_size: int = 16
     lr_gen: float = 0.0002
-    lr_disc: float = 0.0001
+    lr_disc: float = 0.0002
     beta_1: float = 0.5
     lambda_cycle: float = 30.0
-    lambda_identity: float = 15.0
+    lambda_identity: float = 0.5
     
     # Output directories
     weight_dir: str = './weights/cyclegan_2d'
@@ -118,13 +118,13 @@ def parse_args():
                             help='Batch size')
     train_group.add_argument('--lr_gen', type=float, default=0.0002,
                             help='Generator learning rate')
-    train_group.add_argument('--lr_disc', type=float, default=0.0001,
+    train_group.add_argument('--lr_disc', type=float, default=0.0002,
                             help='Discriminator learning rate')
     train_group.add_argument('--beta_1', type=float, default=0.5,
                             help='Adam optimizer beta_1 parameter')
     train_group.add_argument('--lambda_cycle', type=float, default=30.0,
                             help='Cycle consistency loss weight')
-    train_group.add_argument('--lambda_identity', type=float, default=15.0,
+    train_group.add_argument('--lambda_identity', type=float, default=0.5,
                             help='Identity loss weight')
     train_group.add_argument('--gradient_clip_norm', type=float, default=5.0,
                             help='Gradient clipping norm')
