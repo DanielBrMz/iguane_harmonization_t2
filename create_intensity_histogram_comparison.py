@@ -50,7 +50,7 @@ def generate_histogram_comparison(test_data_path, weight_path, output_path,
     data = load_test_data(test_data_path)
     
     images = data['images']
-    ga = data['ga']
+    ga = data['gestational_age']
     sites = data['site']
     
     # Get non-reference sites
