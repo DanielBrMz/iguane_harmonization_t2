@@ -20,6 +20,11 @@ def create_site_comparison_grid(data_path, output_path='site_comparison_grid.png
     images = data['images']  # This should be the actual brain images
     sites = data['site']
     
+    # Normalize if needed (data might be 0-255 or 0-1)
+    if images.max() > 1.0:
+        print(f"Normalizing images from [0, 255] to [0, 1]")
+        images = images.astype(np.float32) / 255.0
+    
     print(f"Data shape: {images.shape}")
     print(f"Data range: {images.min():.3f} - {images.max():.3f}")
     
@@ -63,7 +68,9 @@ def create_site_comparison_grid(data_path, output_path='site_comparison_grid.png
                 
                 # Check if image is valid
                 if img_2d.max() > 0.01:
-                    ax.imshow(img_2d, cmap='gray', vmin=0, vmax=1)
+                    # Enhance contrast for better visualization
+                    img_display = np.clip(img_2d, 0, 1)
+                    ax.imshow(img_display, cmap='gray', vmin=0, vmax=1)
                 else:
                     # Mark as invalid
                     ax.imshow(np.zeros_like(img_2d), cmap='gray')
