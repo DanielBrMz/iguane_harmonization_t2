@@ -22,7 +22,7 @@ def load_data():
         data = pickle.load(f)
     return data
 
-def load_model(epoch=1):
+def load_model(epoch=5):
     """Load trained generator"""
     print(f"Loading model from epoch {epoch}...")
     gen = build_2d_generator((138, 176, 1), 16)
@@ -54,21 +54,22 @@ def create_histogram_plot(data, gen, output_path, n_samples=15):
     
     sites = ['BCH_Placenta', 'HBCD_Site5_Arkansas_UNC', 'VGH_Unknown']
     
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     
     # BEFORE harmonization
     ax_before = axes[0]
     # AFTER harmonization  
     ax_after = axes[1]
     
-    # X-axis for plotting KDE
-    x_range = np.linspace(0, 1, 200)
+    # X-axis for plotting KDE - focus on brain tissue range (0.1 to 0.8)
+    x_range = np.linspace(0.05, 0.85, 200)
     
     # Get BCH_CHD reference samples (blue)
     bch_mask = data['site'] == 'BCH_CHD'
     bch_images = data['images'][bch_mask][:n_samples]
     
     target_mean = None
+    max_density = 0
     
     # Plot BCH reference (blue, same in both plots)
     for img in bch_images:
@@ -77,10 +78,11 @@ def create_histogram_plot(data, gen, output_path, n_samples=15):
             intensities = img[:,:,0][brain_mask]
             if len(intensities) > 50:  # Need enough points for KDE
                 try:
-                    kde = gaussian_kde(intensities, bw_method=0.1)
+                    kde = gaussian_kde(intensities, bw_method=0.08)
                     density = kde(x_range)
-                    ax_before.plot(x_range, density, color='blue', alpha=0.5, linewidth=1.5)
-                    ax_after.plot(x_range, density, color='blue', alpha=0.5, linewidth=1.5)
+                    max_density = max(max_density, density.max())
+                    ax_before.plot(x_range, density, color='blue', alpha=0.6, linewidth=2)
+                    ax_after.plot(x_range, density, color='blue', alpha=0.6, linewidth=2)
                     if target_mean is None:
                         target_mean = intensities.mean()
                 except:
@@ -109,9 +111,10 @@ def create_histogram_plot(data, gen, output_path, n_samples=15):
                 intensities = img[:,:,0][brain_mask]
                 if len(intensities) > 50:
                     try:
-                        kde = gaussian_kde(intensities, bw_method=0.1)
+                        kde = gaussian_kde(intensities, bw_method=0.08)
                         density = kde(x_range)
-                        ax_before.plot(x_range, density, color=color, alpha=0.5, linewidth=1.5)
+                        max_density = max(max_density, density.max())
+                        ax_before.plot(x_range, density, color=color, alpha=0.6, linewidth=2)
                     except:
                         pass
         
@@ -123,34 +126,42 @@ def create_histogram_plot(data, gen, output_path, n_samples=15):
                 intensities = img[:,:,0][brain_mask]
                 if len(intensities) > 50:
                     try:
-                        kde = gaussian_kde(intensities, bw_method=0.1)
+                        kde = gaussian_kde(intensities, bw_method=0.08)
                         density = kde(x_range)
-                        ax_after.plot(x_range, density, color=color, alpha=0.5, linewidth=1.5)
+                        max_density = max(max_density, density.max())
+                        ax_after.plot(x_range, density, color=color, alpha=0.6, linewidth=2)
                     except:
                         pass
     
+    # Set y-axis limit based on actual max density
+    y_max = min(max_density * 1.2, 6)
+    
     # Add "Target Site" arrow to BEFORE plot
-    if target_mean:
-        ax_before.annotate('Target Site', xy=(target_mean, 2.2), xytext=(target_mean-0.15, 2.8),
-                          arrowprops=dict(arrowstyle='->', color='red', lw=2),
-                          fontsize=12, color='red', ha='center')
+    if target_mean and 0.05 <= target_mean <= 0.85:
+        arrow_y = y_max * 0.7
+        ax_before.annotate('Target Site', xy=(target_mean, arrow_y * 0.7), 
+                          xytext=(target_mean-0.1, arrow_y),
+                          arrowprops=dict(arrowstyle='->', color='red', lw=2.5),
+                          fontsize=13, color='red', ha='center', fontweight='bold')
     
     # Formatting BEFORE
-    ax_before.set_xlabel('Image Intensity (a.u.)', fontsize=12)
-    ax_before.set_ylabel('Count (all sites/all patients)', fontsize=12)
-    ax_before.set_title('Before harmonization', fontsize=14, fontweight='bold')
-    ax_before.set_xlim(0.0, 1.0)
-    ax_before.set_ylim(0, 5)
+    ax_before.set_xlabel('Image Intensity (a.u.)', fontsize=13, fontweight='bold')
+    ax_before.set_ylabel('Count (all sites/all patients)', fontsize=13, fontweight='bold')
+    ax_before.set_title('Before harmonization', fontsize=15, fontweight='bold')
+    ax_before.set_xlim(0.05, 0.85)
+    ax_before.set_ylim(0, y_max)
+    ax_before.tick_params(labelsize=11)
     
     # Formatting AFTER
-    ax_after.set_xlabel('Image Intensity (a.u.)', fontsize=12)
-    ax_after.set_ylabel('Count (all sites/all patients)', fontsize=12)
-    ax_after.set_title('After harmonization', fontsize=14, fontweight='bold')
-    ax_after.set_xlim(0.0, 1.0)
-    ax_after.set_ylim(0, 5)
+    ax_after.set_xlabel('Image Intensity (a.u.)', fontsize=13, fontweight='bold')
+    ax_after.set_ylabel('Count (all sites/all patients)', fontsize=13, fontweight='bold')
+    ax_after.set_title('After harmonization', fontsize=15, fontweight='bold')
+    ax_after.set_xlim(0.05, 0.85)
+    ax_after.set_ylim(0, y_max)
+    ax_after.tick_params(labelsize=11)
     
     # Add WM label to AFTER plot (approximate peak location for white matter)
-    ax_after.text(0.75, 4.3, 'WM', fontsize=11, color='blue', fontweight='bold')
+    ax_after.text(0.75, y_max * 0.9, 'WM', fontsize=13, color='blue', fontweight='bold')
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -234,40 +245,43 @@ def create_good_examples(data, gen, output_dir, n_examples=5):
         
         # Original
         axes[0].imshow(orig, cmap='gray', vmin=0, vmax=1)
-        axes[0].set_title(f'Original ({example["site"]})\nMean: {example["orig_mean"]:.3f}', 
-                         fontsize=11)
+        axes[0].set_title(f'Original ({example["site"]})\nBrain Intensity: {example["orig_mean"]:.3f}', 
+                         fontsize=11, fontweight='bold')
         axes[0].axis('off')
         
         # Harmonized
         axes[1].imshow(harm, cmap='gray', vmin=0, vmax=1)
-        axes[1].set_title(f'Harmonized (Epoch 1)\nMean: {example["harm_mean"]:.3f}', 
-                         fontsize=11)
+        axes[1].set_title(f'Harmonized\nBrain Intensity: {example["harm_mean"]:.3f}', 
+                         fontsize=11, fontweight='bold')
         axes[1].axis('off')
         
-        # Difference
-        axes[2].imshow(diff, cmap='hot', vmin=0, vmax=0.3)
-        axes[2].set_title(f'Difference\nImprovement: {example["improvement"]:.3f}', 
-                         fontsize=11)
+        # Difference with colorbar
+        im = axes[2].imshow(diff, cmap='hot', vmin=0, vmax=0.3)
+        axes[2].set_title(f'Difference Map\nIntensity Change: {example["improvement"]:.3f}', 
+                         fontsize=11, fontweight='bold')
         axes[2].axis('off')
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
+        cbar.set_label('Intensity Difference', fontsize=9)
         
         # Target reference (BCH_CHD)
         bch_mask = data['site'] == 'BCH_CHD'
         bch_img = data['images'][bch_mask][idx % 20][:,:,0]
         axes[3].imshow(bch_img, cmap='gray', vmin=0, vmax=1)
         bch_stats = compute_brain_stats(bch_img)
-        axes[3].set_title(f'Target Reference (BCH_CHD)\nMean: {bch_stats["mean"]:.3f}' if bch_stats else 'Target Reference', 
-                         fontsize=11)
+        axes[3].set_title(f'Target Reference (BCH_CHD)\nBrain Intensity: {bch_stats["mean"]:.3f}' if bch_stats else 'Target Reference', 
+                         fontsize=11, fontweight='bold')
         axes[3].axis('off')
         
-        plt.suptitle(f'Example {idx+1}: {example["site"]} → BCH_CHD (GA={example["ga"]:.1f}w)', 
-                    fontsize=13, fontweight='bold')
+        plt.suptitle(f'Harmonization Example {idx+1}: {example["site"]} → BCH_CHD (GA={example["ga"]:.1f} weeks)', 
+                    fontsize=14, fontweight='bold')
         plt.tight_layout()
         
         output_file = output_dir / f'example_{idx+1:02d}_{example["site"]}.png'
         plt.savefig(output_file, dpi=200, bbox_inches='tight')
         plt.close()
         
-        print(f"  Example {idx+1}: {example['site']} - improvement {example['improvement']:.3f}")
+        print(f"  Example {idx+1}: {example['site']} - intensity change {example['improvement']:.3f}")
     
     return selected
 
@@ -314,15 +328,15 @@ def main():
     """Main execution"""
     print("="*80)
     print("GENERATING PRESENTATION RESULTS FOR DR. KIHO IM")
-    print("Using Epoch 1 Model (Correct Harmonization Behavior)")
+    print("Using Epoch 5 Model (Showing Harmonization)")
     print("="*80)
     
     # Load data and model
     data = load_data()
-    gen = load_model(epoch=1)
+    gen = load_model(epoch=5)
     
     # Create output directory
-    output_dir = Path('presentation_results_epoch1')
+    output_dir = Path('presentation_results_epoch5')
     output_dir.mkdir(exist_ok=True)
     
     # 1. Generate histogram visualization (what Kiho specifically requested)
