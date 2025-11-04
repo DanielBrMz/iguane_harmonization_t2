@@ -3,15 +3,20 @@ import pickle
 import matplotlib.pyplot as plt
 from pathlib import Path
 import tensorflow as tf
-from train_fetal_2d_cyclegan import build_2d_generator
+import sys
+
+# Add training directory to path
+sys.path.append(str(Path(__file__).parent.parent / 'training'))
+from models import build_2d_generator
 
 print("="*80)
 print("EVALUATING CYCLEGAN HARMONIZATION RESULTS")
 print("="*80)
 
-# Load test data
+# Load test data (adjust path relative to project root)
 print("\nLoading test data...")
-with open('processed_data_4slice_fixed/test_4slice_data.pkl', 'rb') as f:
+data_path = Path(__file__).parent.parent.parent / 'processed_data_4slice_fixed' / 'test_4slice_data.pkl'
+with open(data_path, 'rb') as f:
     test_data = pickle.load(f)
 
 test_images = test_data['images'][:20] / 255.0  # First 20 slices

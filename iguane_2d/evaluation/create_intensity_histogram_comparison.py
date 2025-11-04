@@ -9,7 +9,8 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import sys
 
-sys.path.append('iguane_2d/training')
+# Add training directory to path (adjusted for new location)
+sys.path.append(str(Path(__file__).parent.parent / 'training'))
 from models import build_2d_generator
 
 

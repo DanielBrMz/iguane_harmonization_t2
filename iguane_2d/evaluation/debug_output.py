@@ -1,10 +1,16 @@
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt
-from train_fetal_2d_cyclegan import build_2d_generator
+from pathlib import Path
+import sys
 
-# Load one test image
-with open('processed_data_4slice_fixed/test_4slice_data.pkl', 'rb') as f:
+# Add training directory to path
+sys.path.append(str(Path(__file__).parent.parent / 'training'))
+from models import build_2d_generator
+
+# Load one test image (adjust path relative to project root)
+data_path = Path(__file__).parent.parent.parent / 'processed_data_4slice_fixed' / 'test_4slice_data.pkl'
+with open(data_path, 'rb') as f:
     test_data = pickle.load(f)
 
 test_img = test_data['images'][0:1] / 255.0
@@ -16,7 +22,8 @@ print(f"  Min: {test_img.min():.4f}, Max: {test_img.max():.4f}, Mean: {test_img.
 
 # Load model
 gen = build_2d_generator((138, 176, 1), 16)
-gen.load_weights('weights/cyclegan_2d/gen_B2A_epoch_50.weights.h5')
+weights_path = Path(__file__).parent.parent / 'training' / 'weights' / 'cyclegan_2d' / 'gen_B2A_epoch_50.weights.h5'
+gen.load_weights(str(weights_path))
 
 # Generate
 output = gen([test_img, test_ga], training=False).numpy()
