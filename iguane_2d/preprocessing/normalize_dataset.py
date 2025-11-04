@@ -39,11 +39,16 @@ def main():
     print(f"NORMALIZING {args.view.upper()} DATASET")
     print("="*80)
     
+    # Get the project root (two levels up from this script)
+    script_dir = Path(__file__).resolve().parent
+    project_root = script_dir.parent.parent
+    data_dir = project_root / 'processed_data_4slice_fixed'
+    
     # Determine input file
     if args.input:
         input_file = args.input
     else:
-        input_file = f'processed_data_4slice_fixed/train_4slice_data_labeled_no_dHCP.pkl_{args.view}_only.pkl'
+        input_file = str(data_dir / f'train_4slice_data_labeled_no_dHCP.pkl_{args.view}_only.pkl')
     
     print(f"\nLoading: {input_file}")
     
@@ -102,7 +107,7 @@ def main():
     if args.output:
         output_file = args.output
     else:
-        output_file = f'processed_data_4slice_fixed/train_{args.view}_only_normalized.pkl'
+        output_file = str(data_dir / f'train_{args.view}_only_normalized.pkl')
     
     print(f"\nSaving to: {output_file}")
     
