@@ -42,7 +42,7 @@ def compute_brain_stats(image, threshold=0.1):
         'max': image[brain_mask].max()
     }
 
-def create_histogram_plot(data, gen, output_path, n_samples=10):
+def create_histogram_plot(data, gen, output_path, n_samples_bch=8, n_samples_other=4):
     """
     Create histogram plot similar to IGUANe paper
     Shows intensity distribution before/after harmonization
@@ -62,37 +62,35 @@ def create_histogram_plot(data, gen, output_path, n_samples=10):
     ax_after = axes[1]
     
     # X-axis for plotting KDE - focus on meaningful brain tissue range
-    x_range = np.linspace(0.15, 0.75, 300)
+    x_range = np.linspace(0.15, 0.70, 300)
     
     # Get BCH_CHD reference samples (blue)
     bch_mask = data['site'] == 'BCH_CHD'
-    bch_images = data['images'][bch_mask][:n_samples]
+    bch_images = data['images'][bch_mask]
     
     target_mean = None
-    max_density = 0
     
-    # Plot BCH reference (blue, same in both plots)
+    # Plot BCH reference (blue, same in both plots) - more samples since it's reference
     bch_count = 0
     for img in bch_images:
-        brain_mask = img[:,:,0] > 0.1
-        if brain_mask.sum() > 100:
+        if bch_count >= n_samples_bch:
+            break
+        brain_mask = img[:,:,0] > 0.12
+        if brain_mask.sum() > 200:
             intensities = img[:,:,0][brain_mask]
             # Filter to only brain tissue range
-            intensities = intensities[(intensities >= 0.15) & (intensities <= 0.75)]
-            if len(intensities) > 50:  # Need enough points for KDE
+            intensities = intensities[(intensities >= 0.15) & (intensities <= 0.70)]
+            if len(intensities) > 100:  # Need enough points for KDE
                 try:
-                    kde = gaussian_kde(intensities, bw_method=0.06)
+                    kde = gaussian_kde(intensities, bw_method=0.05)
                     density = kde(x_range)
-                    # Clip extreme values
-                    density = np.clip(density, 0, 6)
-                    max_density = max(max_density, density.max())
-                    ax_before.plot(x_range, density, color='blue', alpha=0.7, linewidth=2)
-                    ax_after.plot(x_range, density, color='blue', alpha=0.7, linewidth=2)
+                    # Smooth clipping
+                    density = np.clip(density, 0, 5.0)
+                    ax_before.plot(x_range, density, color='blue', alpha=0.65, linewidth=2.2)
+                    ax_after.plot(x_range, density, color='blue', alpha=0.65, linewidth=2.2)
                     if target_mean is None:
                         target_mean = intensities.mean()
                     bch_count += 1
-                    if bch_count >= n_samples:
-                        break
                 except:
                     pass
     
@@ -106,86 +104,88 @@ def create_histogram_plot(data, gen, output_path, n_samples=10):
             
         color = colors.get(site_name, 'gray')
         site_mask = data['site'] == site_name
-        site_images = data['images'][site_mask][:n_samples]
-        site_ga = data['gestational_age'][site_mask][:n_samples]
+        site_images = data['images'][site_mask]
+        site_ga = data['gestational_age'][site_mask]
         
         if len(site_images) == 0:
             continue
         
-        # BEFORE: Plot original intensity distributions
+        # BEFORE: Plot original intensity distributions (fewer samples for clarity)
         site_count = 0
         for img in site_images:
-            brain_mask = img[:,:,0] > 0.1
-            if brain_mask.sum() > 100:
+            if site_count >= n_samples_other:
+                break
+            brain_mask = img[:,:,0] > 0.12
+            if brain_mask.sum() > 200:
                 intensities = img[:,:,0][brain_mask]
                 # Filter to brain tissue range
-                intensities = intensities[(intensities >= 0.15) & (intensities <= 0.75)]
-                if len(intensities) > 50:
+                intensities = intensities[(intensities >= 0.15) & (intensities <= 0.70)]
+                if len(intensities) > 100:
                     try:
-                        kde = gaussian_kde(intensities, bw_method=0.06)
+                        kde = gaussian_kde(intensities, bw_method=0.05)
                         density = kde(x_range)
-                        # Clip extreme values
-                        density = np.clip(density, 0, 6)
-                        max_density = max(max_density, density.max())
-                        ax_before.plot(x_range, density, color=color, alpha=0.7, linewidth=2)
+                        # Smooth clipping
+                        density = np.clip(density, 0, 5.0)
+                        ax_before.plot(x_range, density, color=color, alpha=0.65, linewidth=2.2)
                         site_count += 1
-                        if site_count >= n_samples // 2:  # Fewer non-BCH samples
-                            break
                     except:
                         pass
         
         # AFTER: Plot harmonized intensity distributions
-        harmonized = gen.predict([site_images[:n_samples//2], site_ga[:n_samples//2]], verbose=0, batch_size=4)
+        n_harm = min(n_samples_other, len(site_images))
+        harmonized = gen.predict([site_images[:n_harm], site_ga[:n_harm]], verbose=0, batch_size=4)
         for img in harmonized:
-            brain_mask = img[:,:,0] > 0.1
-            if brain_mask.sum() > 100:
+            brain_mask = img[:,:,0] > 0.12
+            if brain_mask.sum() > 200:
                 intensities = img[:,:,0][brain_mask]
                 # Filter to brain tissue range
-                intensities = intensities[(intensities >= 0.15) & (intensities <= 0.75)]
-                if len(intensities) > 50:
+                intensities = intensities[(intensities >= 0.15) & (intensities <= 0.70)]
+                if len(intensities) > 100:
                     try:
-                        kde = gaussian_kde(intensities, bw_method=0.06)
+                        kde = gaussian_kde(intensities, bw_method=0.05)
                         density = kde(x_range)
-                        # Clip extreme values
-                        density = np.clip(density, 0, 6)
-                        max_density = max(max_density, density.max())
-                        ax_after.plot(x_range, density, color=color, alpha=0.7, linewidth=2)
+                        # Smooth clipping
+                        density = np.clip(density, 0, 5.0)
+                        ax_after.plot(x_range, density, color=color, alpha=0.65, linewidth=2.2)
                     except:
                         pass
     
-    # Set y-axis limit based on actual max density
-    y_max = min(max_density * 1.1, 5.5)
+    # Y-axis limit
+    y_max = 5.2
     
-    # Add "Target Site" arrow to BEFORE plot
-    if target_mean and 0.15 <= target_mean <= 0.75:
-        arrow_y = y_max * 0.65
-        ax_before.annotate('Target Site', xy=(target_mean, arrow_y * 0.75), 
-                          xytext=(target_mean, arrow_y * 1.05),
-                          arrowprops=dict(arrowstyle='->', color='red', lw=2.5),
-                          fontsize=13, color='red', ha='center', fontweight='bold')
+    # Add "Target Site" arrow to BEFORE plot - positioned better
+    if target_mean and 0.15 <= target_mean <= 0.70:
+        arrow_y_pos = 3.8
+        ax_before.annotate('Target Site', xy=(target_mean, 3.2), 
+                          xytext=(target_mean, arrow_y_pos),
+                          arrowprops=dict(arrowstyle='->', color='red', lw=2.8),
+                          fontsize=14, color='red', ha='center', fontweight='bold')
     
     # Formatting BEFORE
-    ax_before.set_xlabel('Image Intensity (a.u.)', fontsize=13, fontweight='bold')
-    ax_before.set_ylabel('Count (all sites/all patients)', fontsize=13, fontweight='bold')
-    ax_before.set_title('Before harmonization', fontsize=15, fontweight='bold')
-    ax_before.set_xlim(0.1, 0.8)
+    ax_before.set_xlabel('Image Intensity (a.u.)', fontsize=14, fontweight='bold')
+    ax_before.set_ylabel('Count (all sites/all patients)', fontsize=14, fontweight='bold')
+    ax_before.set_title('Before harmonization', fontsize=16, fontweight='bold')
+    ax_before.set_xlim(0.1, 0.75)
     ax_before.set_ylim(0, y_max)
-    ax_before.tick_params(labelsize=11)
+    ax_before.tick_params(labelsize=12)
     ax_before.spines['top'].set_visible(False)
     ax_before.spines['right'].set_visible(False)
+    ax_before.grid(True, alpha=0.2, linestyle='--')
     
     # Formatting AFTER
-    ax_after.set_xlabel('Image Intensity (a.u.)', fontsize=13, fontweight='bold')
-    ax_after.set_ylabel('Count (all sites/all patients)', fontsize=13, fontweight='bold')
-    ax_after.set_title('After harmonization', fontsize=15, fontweight='bold')
-    ax_after.set_xlim(0.1, 0.8)
+    ax_after.set_xlabel('Image Intensity (a.u.)', fontsize=14, fontweight='bold')
+    ax_after.set_ylabel('Count (all sites/all patients)', fontsize=14, fontweight='bold')
+    ax_after.set_title('After harmonization', fontsize=16, fontweight='bold')
+    ax_after.set_xlim(0.1, 0.75)
     ax_after.set_ylim(0, y_max)
-    ax_after.tick_params(labelsize=11)
+    ax_after.tick_params(labelsize=12)
     ax_after.spines['top'].set_visible(False)
     ax_after.spines['right'].set_visible(False)
+    ax_after.grid(True, alpha=0.2, linestyle='--')
     
     # Add WM label to AFTER plot
-    ax_after.text(0.68, y_max * 0.88, 'WM', fontsize=14, color='blue', fontweight='bold')
+    ax_after.text(0.62, 4.7, 'WM', fontsize=15, color='blue', fontweight='bold',
+                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7, edgecolor='none'))
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -367,7 +367,8 @@ def main():
     create_histogram_plot(
         data, gen, 
         output_dir / 'histogram_before_after.png',
-        n_samples=20
+        n_samples_bch=8,  # 8 BCH reference samples
+        n_samples_other=4  # 4 samples per non-BCH site
     )
     
     # 2. Find and save good examples
