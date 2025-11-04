@@ -15,6 +15,16 @@ from scipy.stats import gaussian_kde
 sys.path.append('iguane_2d/training')
 from models import build_2d_generator
 
+
+def clean_site_name(site_name):
+    """Clean site names for visualization purposes"""
+    # Remove _Unknown suffix
+    site_name = site_name.replace('_Unknown', '')
+    # Replace underscores with spaces for readability
+    site_name = site_name.replace('_', ' ')
+    return site_name
+
+
 def load_data():
     """Load normalized training data"""
     print("Loading data...")
@@ -151,7 +161,7 @@ def create_histogram_plot(data, gen, output_path, n_samples_bch=8, n_samples_oth
                         pass
     
     # Y-axis limit
-    y_max = 5.2
+    y_max = 5.8
     
     # Add "Target Site" arrow to BEFORE plot - positioned better
     if target_mean and 0.15 <= target_mean <= 0.70:
@@ -165,7 +175,7 @@ def create_histogram_plot(data, gen, output_path, n_samples_bch=8, n_samples_oth
     ax_before.set_xlabel('Image Intensity (a.u.)', fontsize=14, fontweight='bold')
     ax_before.set_ylabel('Count (all sites/all patients)', fontsize=14, fontweight='bold')
     ax_before.set_title('Before harmonization', fontsize=16, fontweight='bold')
-    ax_before.set_xlim(0.1, 0.75)
+    ax_before.set_xlim(0.08, 0.78)  # Extended range to fit all curves
     ax_before.set_ylim(0, y_max)
     ax_before.tick_params(labelsize=12)
     ax_before.spines['top'].set_visible(False)
@@ -176,7 +186,7 @@ def create_histogram_plot(data, gen, output_path, n_samples_bch=8, n_samples_oth
     ax_after.set_xlabel('Image Intensity (a.u.)', fontsize=14, fontweight='bold')
     ax_after.set_ylabel('Count (all sites/all patients)', fontsize=14, fontweight='bold')
     ax_after.set_title('After harmonization', fontsize=16, fontweight='bold')
-    ax_after.set_xlim(0.1, 0.75)
+    ax_after.set_xlim(0.08, 0.78)  # Extended range to fit all curves
     ax_after.set_ylim(0, y_max)
     ax_after.tick_params(labelsize=12)
     ax_after.spines['top'].set_visible(False)
@@ -184,7 +194,7 @@ def create_histogram_plot(data, gen, output_path, n_samples_bch=8, n_samples_oth
     ax_after.grid(True, alpha=0.2, linestyle='--')
     
     # Add WM label to AFTER plot
-    ax_after.text(0.62, 4.7, 'WM', fontsize=15, color='blue', fontweight='bold',
+    ax_after.text(0.62, 5.4, 'WM', fontsize=15, color='blue', fontweight='bold',
                  bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7, edgecolor='none'))
     
     plt.tight_layout()
@@ -269,7 +279,7 @@ def create_good_examples(data, gen, output_dir, n_examples=5):
         
         # Original
         axes[0].imshow(orig, cmap='gray', vmin=0, vmax=1)
-        axes[0].set_title(f'Original ({example["site"]})\nBrain Intensity: {example["orig_mean"]:.3f}', 
+        axes[0].set_title(f'Original ({clean_site_name(example["site"])})\nBrain Intensity: {example["orig_mean"]:.3f}', 
                          fontsize=11, fontweight='bold')
         axes[0].axis('off')
         
@@ -297,7 +307,7 @@ def create_good_examples(data, gen, output_dir, n_examples=5):
                          fontsize=11, fontweight='bold')
         axes[3].axis('off')
         
-        plt.suptitle(f'Harmonization Example {idx+1}: {example["site"]} → BCH_CHD (GA={example["ga"]:.1f} weeks)', 
+        plt.suptitle(f'Harmonization Example {idx+1}: {clean_site_name(example["site"])} → BCH CHD (GA={example["ga"]:.1f} weeks)', 
                     fontsize=14, fontweight='bold')
         plt.tight_layout()
         
