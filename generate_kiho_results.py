@@ -9,6 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import sys
+import argparse
 from scipy.stats import gaussian_kde
 
 # Add training directory to path
@@ -25,10 +26,14 @@ def clean_site_name(site_name):
     return site_name
 
 
-def load_data():
-    """Load normalized training data"""
-    print("Loading data...")
-    with open('processed_data_4slice_fixed/train_sagittal_only_normalized.pkl', 'rb') as f:
+def load_data(view='sagittal'):
+    """Load normalized training data for specified view"""
+    print(f"Loading {view} data...")
+    data_file = f'processed_data_4slice_fixed/train_{view}_only_normalized.pkl'
+    if not Path(data_file).exists():
+        raise FileNotFoundError(f"Data file not found: {data_file}")
+    
+    with open(data_file, 'rb') as f:
         data = pickle.load(f)
     return data
 
@@ -384,32 +389,80 @@ def create_summary_stats(data, gen, selected_examples):
 
 def main():
     """Main execution"""
+    parser = argparse.ArgumentParser(
+        description='Generate presentation results for Dr. Kiho Im',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument(
+        '--view',
+        type=str,
+        choices=['sagittal', 'axial', 'coronal'],
+        default='sagittal',
+        help='Brain MRI view to process (sagittal, axial, or coronal)'
+    )
+    parser.add_argument(
+        '--epoch',
+        type=int,
+        default=5,
+        help='Model epoch to use for harmonization'
+    )
+    parser.add_argument(
+        '--n_samples_bch',
+        type=int,
+        default=8,
+        help='Number of BCH reference samples to plot'
+    )
+    parser.add_argument(
+        '--n_samples_other',
+        type=int,
+        default=4,
+        help='Number of samples per non-BCH site to plot'
+    )
+    parser.add_argument(
+        '--n_examples',
+        type=int,
+        default=5,
+        help='Number of good examples to find per site'
+    )
+    parser.add_argument(
+        '--output_dir',
+        type=str,
+        default=None,
+        help='Output directory (default: presentation_results_epoch{epoch}_{view})'
+    )
+    
+    args = parser.parse_args()
+    
     print("="*80)
     print("GENERATING PRESENTATION RESULTS FOR DR. KIHO IM")
-    print("Using Epoch 5 Model (Showing Harmonization)")
+    print(f"View: {args.view.upper()}")
+    print(f"Using Epoch {args.epoch} Model")
     print("="*80)
     
     # Load data and model
-    data = load_data()
-    gen = load_model(epoch=5)
+    data = load_data(view=args.view)
+    gen = load_model(epoch=args.epoch)
     
     # Create output directory
-    output_dir = Path('presentation_results_epoch5')
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    else:
+        output_dir = Path(f'presentation_results_epoch{args.epoch}_{args.view}')
     output_dir.mkdir(exist_ok=True)
     
     # 1. Generate histogram visualization (what Kiho specifically requested)
     create_histogram_plot(
         data, gen, 
         output_dir / 'histogram_before_after.png',
-        n_samples_bch=8,  # 8 BCH reference samples
-        n_samples_other=4  # 4 samples per non-BCH site
+        n_samples_bch=args.n_samples_bch,
+        n_samples_other=args.n_samples_other
     )
     
     # 2. Find and save good examples
     selected = create_good_examples(
         data, gen,
         output_dir / 'good_examples',
-        n_examples=5
+        n_examples=args.n_examples
     )
     
     # 3. Compute summary statistics
