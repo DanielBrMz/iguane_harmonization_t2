@@ -42,7 +42,7 @@ def compute_brain_stats(image, threshold=0.1):
         'max': image[brain_mask].max()
     }
 
-def create_histogram_plot(data, gen, output_path, n_samples=15):
+def create_histogram_plot(data, gen, output_path, n_samples=10):
     """
     Create histogram plot similar to IGUANe paper
     Shows intensity distribution before/after harmonization
@@ -61,8 +61,8 @@ def create_histogram_plot(data, gen, output_path, n_samples=15):
     # AFTER harmonization  
     ax_after = axes[1]
     
-    # X-axis for plotting KDE - focus on brain tissue range (0.1 to 0.8)
-    x_range = np.linspace(0.05, 0.85, 200)
+    # X-axis for plotting KDE - focus on meaningful brain tissue range
+    x_range = np.linspace(0.15, 0.75, 300)
     
     # Get BCH_CHD reference samples (blue)
     bch_mask = data['site'] == 'BCH_CHD'
@@ -72,19 +72,27 @@ def create_histogram_plot(data, gen, output_path, n_samples=15):
     max_density = 0
     
     # Plot BCH reference (blue, same in both plots)
+    bch_count = 0
     for img in bch_images:
         brain_mask = img[:,:,0] > 0.1
         if brain_mask.sum() > 100:
             intensities = img[:,:,0][brain_mask]
+            # Filter to only brain tissue range
+            intensities = intensities[(intensities >= 0.15) & (intensities <= 0.75)]
             if len(intensities) > 50:  # Need enough points for KDE
                 try:
-                    kde = gaussian_kde(intensities, bw_method=0.08)
+                    kde = gaussian_kde(intensities, bw_method=0.06)
                     density = kde(x_range)
+                    # Clip extreme values
+                    density = np.clip(density, 0, 6)
                     max_density = max(max_density, density.max())
-                    ax_before.plot(x_range, density, color='blue', alpha=0.6, linewidth=2)
-                    ax_after.plot(x_range, density, color='blue', alpha=0.6, linewidth=2)
+                    ax_before.plot(x_range, density, color='blue', alpha=0.7, linewidth=2)
+                    ax_after.plot(x_range, density, color='blue', alpha=0.7, linewidth=2)
                     if target_mean is None:
                         target_mean = intensities.mean()
+                    bch_count += 1
+                    if bch_count >= n_samples:
+                        break
                 except:
                     pass
     
@@ -105,42 +113,54 @@ def create_histogram_plot(data, gen, output_path, n_samples=15):
             continue
         
         # BEFORE: Plot original intensity distributions
+        site_count = 0
         for img in site_images:
             brain_mask = img[:,:,0] > 0.1
             if brain_mask.sum() > 100:
                 intensities = img[:,:,0][brain_mask]
+                # Filter to brain tissue range
+                intensities = intensities[(intensities >= 0.15) & (intensities <= 0.75)]
                 if len(intensities) > 50:
                     try:
-                        kde = gaussian_kde(intensities, bw_method=0.08)
+                        kde = gaussian_kde(intensities, bw_method=0.06)
                         density = kde(x_range)
+                        # Clip extreme values
+                        density = np.clip(density, 0, 6)
                         max_density = max(max_density, density.max())
-                        ax_before.plot(x_range, density, color=color, alpha=0.6, linewidth=2)
+                        ax_before.plot(x_range, density, color=color, alpha=0.7, linewidth=2)
+                        site_count += 1
+                        if site_count >= n_samples // 2:  # Fewer non-BCH samples
+                            break
                     except:
                         pass
         
         # AFTER: Plot harmonized intensity distributions
-        harmonized = gen.predict([site_images, site_ga], verbose=0, batch_size=4)
+        harmonized = gen.predict([site_images[:n_samples//2], site_ga[:n_samples//2]], verbose=0, batch_size=4)
         for img in harmonized:
             brain_mask = img[:,:,0] > 0.1
             if brain_mask.sum() > 100:
                 intensities = img[:,:,0][brain_mask]
+                # Filter to brain tissue range
+                intensities = intensities[(intensities >= 0.15) & (intensities <= 0.75)]
                 if len(intensities) > 50:
                     try:
-                        kde = gaussian_kde(intensities, bw_method=0.08)
+                        kde = gaussian_kde(intensities, bw_method=0.06)
                         density = kde(x_range)
+                        # Clip extreme values
+                        density = np.clip(density, 0, 6)
                         max_density = max(max_density, density.max())
-                        ax_after.plot(x_range, density, color=color, alpha=0.6, linewidth=2)
+                        ax_after.plot(x_range, density, color=color, alpha=0.7, linewidth=2)
                     except:
                         pass
     
     # Set y-axis limit based on actual max density
-    y_max = min(max_density * 1.2, 6)
+    y_max = min(max_density * 1.1, 5.5)
     
     # Add "Target Site" arrow to BEFORE plot
-    if target_mean and 0.05 <= target_mean <= 0.85:
-        arrow_y = y_max * 0.7
-        ax_before.annotate('Target Site', xy=(target_mean, arrow_y * 0.7), 
-                          xytext=(target_mean-0.1, arrow_y),
+    if target_mean and 0.15 <= target_mean <= 0.75:
+        arrow_y = y_max * 0.65
+        ax_before.annotate('Target Site', xy=(target_mean, arrow_y * 0.75), 
+                          xytext=(target_mean, arrow_y * 1.05),
                           arrowprops=dict(arrowstyle='->', color='red', lw=2.5),
                           fontsize=13, color='red', ha='center', fontweight='bold')
     
@@ -148,20 +168,24 @@ def create_histogram_plot(data, gen, output_path, n_samples=15):
     ax_before.set_xlabel('Image Intensity (a.u.)', fontsize=13, fontweight='bold')
     ax_before.set_ylabel('Count (all sites/all patients)', fontsize=13, fontweight='bold')
     ax_before.set_title('Before harmonization', fontsize=15, fontweight='bold')
-    ax_before.set_xlim(0.05, 0.85)
+    ax_before.set_xlim(0.1, 0.8)
     ax_before.set_ylim(0, y_max)
     ax_before.tick_params(labelsize=11)
+    ax_before.spines['top'].set_visible(False)
+    ax_before.spines['right'].set_visible(False)
     
     # Formatting AFTER
     ax_after.set_xlabel('Image Intensity (a.u.)', fontsize=13, fontweight='bold')
     ax_after.set_ylabel('Count (all sites/all patients)', fontsize=13, fontweight='bold')
     ax_after.set_title('After harmonization', fontsize=15, fontweight='bold')
-    ax_after.set_xlim(0.05, 0.85)
+    ax_after.set_xlim(0.1, 0.8)
     ax_after.set_ylim(0, y_max)
     ax_after.tick_params(labelsize=11)
+    ax_after.spines['top'].set_visible(False)
+    ax_after.spines['right'].set_visible(False)
     
-    # Add WM label to AFTER plot (approximate peak location for white matter)
-    ax_after.text(0.75, y_max * 0.9, 'WM', fontsize=13, color='blue', fontweight='bold')
+    # Add WM label to AFTER plot
+    ax_after.text(0.68, y_max * 0.88, 'WM', fontsize=14, color='blue', fontweight='bold')
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
