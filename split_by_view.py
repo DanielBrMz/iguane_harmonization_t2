@@ -16,7 +16,7 @@ def split_by_view(labeled_data_path):
     
     images = data['images']
     sites = data['site']
-    ga = data['ga']
+    ga = data['gestational_age']
     views = data['view']
     
     if 'sex' in data:
