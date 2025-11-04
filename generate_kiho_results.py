@@ -61,10 +61,12 @@ def create_histogram_plot(data, gen, output_path, n_samples_bch=8, n_samples_oth
     print("\nCreating histogram visualization (IGUANe style)...")
     
     from scipy.stats import gaussian_kde
+    from matplotlib.patches import Patch
     
     sites = ['BCH_Placenta', 'HBCD_Site5_Arkansas_UNC', 'VGH_Unknown']
     
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    # Create figure with space for legend at bottom
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
     
     # BEFORE harmonization
     ax_before = axes[0]
@@ -80,6 +82,9 @@ def create_histogram_plot(data, gen, output_path, n_samples_bch=8, n_samples_oth
     
     target_mean = None
     
+    # Collect all densities first to determine appropriate y-axis range
+    all_densities = []
+    
     # Plot BCH reference (blue, same in both plots) - more samples since it's reference
     bch_count = 0
     for img in bch_images:
@@ -92,12 +97,12 @@ def create_histogram_plot(data, gen, output_path, n_samples_bch=8, n_samples_oth
             intensities = intensities[(intensities >= 0.15) & (intensities <= 0.70)]
             if len(intensities) > 100:  # Need enough points for KDE
                 try:
-                    kde = gaussian_kde(intensities, bw_method=0.05)
+                    # Use smoother bandwidth to avoid extreme peaks
+                    kde = gaussian_kde(intensities, bw_method=0.08)
                     density = kde(x_range)
-                    # Smooth clipping
-                    density = np.clip(density, 0, 5.0)
-                    ax_before.plot(x_range, density, color='blue', alpha=0.65, linewidth=2.2)
-                    ax_after.plot(x_range, density, color='blue', alpha=0.65, linewidth=2.2)
+                    all_densities.append(density)
+                    ax_before.plot(x_range, density, color='blue', alpha=0.6, linewidth=2.0)
+                    ax_after.plot(x_range, density, color='blue', alpha=0.6, linewidth=2.0)
                     if target_mean is None:
                         target_mean = intensities.mean()
                     bch_count += 1
@@ -132,11 +137,11 @@ def create_histogram_plot(data, gen, output_path, n_samples_bch=8, n_samples_oth
                 intensities = intensities[(intensities >= 0.15) & (intensities <= 0.70)]
                 if len(intensities) > 100:
                     try:
-                        kde = gaussian_kde(intensities, bw_method=0.05)
+                        # Use smoother bandwidth to avoid extreme peaks
+                        kde = gaussian_kde(intensities, bw_method=0.08)
                         density = kde(x_range)
-                        # Smooth clipping
-                        density = np.clip(density, 0, 5.0)
-                        ax_before.plot(x_range, density, color=color, alpha=0.65, linewidth=2.2)
+                        all_densities.append(density)
+                        ax_before.plot(x_range, density, color=color, alpha=0.6, linewidth=2.0)
                         site_count += 1
                     except:
                         pass
@@ -152,52 +157,71 @@ def create_histogram_plot(data, gen, output_path, n_samples_bch=8, n_samples_oth
                 intensities = intensities[(intensities >= 0.15) & (intensities <= 0.70)]
                 if len(intensities) > 100:
                     try:
-                        kde = gaussian_kde(intensities, bw_method=0.05)
+                        # Use smoother bandwidth to avoid extreme peaks
+                        kde = gaussian_kde(intensities, bw_method=0.08)
                         density = kde(x_range)
-                        # Smooth clipping
-                        density = np.clip(density, 0, 5.0)
-                        ax_after.plot(x_range, density, color=color, alpha=0.65, linewidth=2.2)
+                        all_densities.append(density)
+                        ax_after.plot(x_range, density, color=color, alpha=0.6, linewidth=2.0)
                     except:
                         pass
     
-    # Y-axis limit
-    y_max = 5.8
-    
-    # Add "Target Site" arrow to BEFORE plot - positioned better
-    if target_mean and 0.15 <= target_mean <= 0.70:
-        arrow_y_pos = 3.8
-        ax_before.annotate('Target Site', xy=(target_mean, 3.2), 
-                          xytext=(target_mean, arrow_y_pos),
-                          arrowprops=dict(arrowstyle='->', color='red', lw=2.8),
-                          fontsize=14, color='red', ha='center', fontweight='bold')
+    # Calculate appropriate y-axis limit based on actual data
+    if all_densities:
+        max_density = np.max([d.max() for d in all_densities])
+        y_max = max_density * 1.15  # Add 15% headroom
+    else:
+        y_max = 6.0  # Fallback
     
     # Formatting BEFORE
     ax_before.set_xlabel('Image Intensity (a.u.)', fontsize=14, fontweight='bold')
     ax_before.set_ylabel('Count (all sites/all patients)', fontsize=14, fontweight='bold')
     ax_before.set_title('Before harmonization', fontsize=16, fontweight='bold')
-    ax_before.set_xlim(0.08, 0.78)  # Extended range to fit all curves
+    ax_before.set_xlim(0.08, 0.75)
     ax_before.set_ylim(0, y_max)
     ax_before.tick_params(labelsize=12)
     ax_before.spines['top'].set_visible(False)
     ax_before.spines['right'].set_visible(False)
-    ax_before.grid(True, alpha=0.2, linestyle='--')
+    ax_before.grid(True, alpha=0.25, linestyle='--', linewidth=0.8)
     
     # Formatting AFTER
     ax_after.set_xlabel('Image Intensity (a.u.)', fontsize=14, fontweight='bold')
     ax_after.set_ylabel('Count (all sites/all patients)', fontsize=14, fontweight='bold')
     ax_after.set_title('After harmonization', fontsize=16, fontweight='bold')
-    ax_after.set_xlim(0.08, 0.78)  # Extended range to fit all curves
+    ax_after.set_xlim(0.08, 0.75)
     ax_after.set_ylim(0, y_max)
     ax_after.tick_params(labelsize=12)
     ax_after.spines['top'].set_visible(False)
     ax_after.spines['right'].set_visible(False)
-    ax_after.grid(True, alpha=0.2, linestyle='--')
+    ax_after.grid(True, alpha=0.25, linestyle='--', linewidth=0.8)
     
-    # Add WM label to AFTER plot
-    ax_after.text(0.62, 5.4, 'WM', fontsize=15, color='blue', fontweight='bold',
-                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7, edgecolor='none'))
+    # Add tissue type indicators to AFTER plot
+    # Gray Matter (GM) - typically around 0.25-0.35
+    ax_after.axvline(x=0.30, color='gray', linestyle=':', linewidth=2.5, alpha=0.7)
+    ax_after.text(0.30, y_max * 0.97, 'GM', fontsize=13, color='gray', fontweight='bold',
+                 ha='center', va='top',
+                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.9, edgecolor='gray', linewidth=1.5))
+    
+    # White Matter (WM) - typically around 0.40-0.50
+    ax_after.axvline(x=0.45, color='navy', linestyle=':', linewidth=2.5, alpha=0.7)
+    ax_after.text(0.45, y_max * 0.97, 'WM', fontsize=13, color='navy', fontweight='bold',
+                 ha='center', va='top',
+                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.9, edgecolor='navy', linewidth=1.5))
+    
+    # Create legend with site colors
+    legend_elements = [
+        Patch(facecolor='blue', edgecolor='blue', label='BCH CHD (Reference)', alpha=0.7),
+        Patch(facecolor='red', edgecolor='red', label='BCH Placenta', alpha=0.7),
+        Patch(facecolor='green', edgecolor='green', label='HBCD Site5 Arkansas UNC', alpha=0.7),
+        Patch(facecolor='orange', edgecolor='orange', label='VGH', alpha=0.7)
+    ]
+    
+    # Add legend below plots, centered
+    fig.legend(handles=legend_elements, loc='lower center', ncol=4, 
+              fontsize=12, frameon=True, fancybox=True, shadow=True,
+              bbox_to_anchor=(0.5, -0.05))
     
     plt.tight_layout()
+    plt.subplots_adjust(bottom=0.12)  # Make room for legend
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"Saved: {output_path}")
     plt.close()
