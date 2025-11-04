@@ -19,6 +19,12 @@ This directory contains the IGUANe 2D implementation for harmonization of 2D fet
   - `prepare_fetal_4slice_data.py` - 4-slice extraction and preparation
   - `create_training_csvs_from_best_images.py` - Training set creation
   - `fix_demographics_in_csvs.py` - Demographics data cleaning
+  - `normalize_dataset.py` - Dataset normalization by view
+  - `split_by_view.py` - Split dataset by view type (sagittal/axial/coronal)
+  - **labeling/** - View labeling tools
+    - `auto_classify_views.py` - Semi-automated view classification
+    - `batch_label_views.py` - Batch labeling workflow
+    - `manual_label_views.py` - Interactive labeling interface
   
 - **evaluation/** - Model evaluation and analysis
   - `evaluate_cyclegan_results.py` - CycleGAN evaluation
@@ -26,6 +32,10 @@ This directory contains the IGUANe 2D implementation for harmonization of 2D fet
   - `run_complete_evaluation.py` - Comprehensive evaluation pipeline
   - `create_visual_comparison.py` - Visual comparison generation
   - `debug_output.py` - Debugging utilities
+  - `create_intensity_histogram_comparison.py` - Intensity distribution analysis
+  - `create_training_contact_sheet.py` - Training data visualization
+  - `plot_training_history.py` - Training loss/metric plots
+  - `generate_kiho_results.py` - Generate presentation-ready results
   
 - **harmonization/** - Harmonization inference
   - `harmonize_and_enhance.py` - Harmonization with enhancement
