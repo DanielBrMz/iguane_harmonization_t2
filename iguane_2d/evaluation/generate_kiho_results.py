@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Generate presentation-ready results for Dr. Kiho Im - FIXED VERSION
-Uses SAGITTAL views (existing trained model)
+Supports SAGITTAL, AXIAL, or CORONAL views (configurable via --view parameter)
 - Accurate histogram (no intensity filtering)  
 - Excludes BCH_Placenta from visualization
 - Consistent brain mask threshold (0.1)
@@ -19,19 +19,19 @@ sys.path.append(str(Path(__file__).parent.parent / 'training'))
 from models import build_2d_generator
 
 
-def load_data():
-    """Load normalized sagittal training data"""
-    print("Loading sagittal data...")
+def load_data(view='sagittal'):
+    """Load normalized training data for specified view"""
+    print(f"Loading {view} data...")
     # Adjust path relative to project root
-    data_path = Path(__file__).parent.parent.parent / 'processed_data_4slice_fixed' / 'train_sagittal_only_normalized.pkl'
+    data_path = Path(__file__).parent.parent.parent / 'processed_data_4slice_fixed' / f'train_{view}_only_normalized.pkl'
     with open(data_path, 'rb') as f:
         data = pickle.load(f)
     return data
 
 
-def load_model(epoch=5):
-    """Load trained generator"""
-    print(f"Loading model from epoch {epoch}...")
+def load_model(view='sagittal', epoch=5):
+    """Load trained generator for specified view"""
+    print(f"Loading {view} model from epoch {epoch}...")
     gen = build_2d_generator((138, 176, 1), 16)
     # Adjust path relative to training directory
     weights_path = Path(__file__).parent.parent / 'training' / 'weights' / 'cyclegan_2d' / f'gen_site2BCH_epoch_{epoch}.weights.h5'
@@ -238,7 +238,7 @@ def create_histogram_plot(data, gen, output_path, n_samples_bch=10, n_samples_ot
     plt.close()
 
 
-def create_good_examples(data, gen, output_dir, n_examples=5):
+def create_good_examples(data, gen, output_dir, view='sagittal', n_examples=5):
     """Find and visualize best harmonization examples"""
     print("\nFinding good harmonization examples...")
     
@@ -333,11 +333,11 @@ def create_good_examples(data, gen, output_dir, n_examples=5):
                          fontsize=11, fontweight='bold')
         axes[3].axis('off')
         
-        plt.suptitle(f'Sagittal Example {idx+1}: {example["site"].replace("_", " ")} → BCH CHD (GA={example["ga"]:.1f}w)', 
+        plt.suptitle(f'{view.capitalize()} Example {idx+1}: {example["site"].replace("_", " ")} → BCH CHD (GA={example["ga"]:.1f}w)', 
                     fontsize=14, fontweight='bold')
         plt.tight_layout()
         
-        output_file = output_dir / f'sagittal_example_{idx+1:02d}_{example["site"]}.png'
+        output_file = output_dir / f'example_{idx+1:02d}_{example["site"]}.png'
         plt.savefig(output_file, dpi=200, bbox_inches='tight')
         plt.close()
         
@@ -350,20 +350,35 @@ def main():
     """Main execution"""
     import argparse
     
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--epoch', type=int, default=5, help='Epoch to use')
+    parser = argparse.ArgumentParser(
+        description='Generate presentation-ready harmonization results',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument(
+        '--view',
+        type=str,
+        choices=['sagittal', 'axial', 'coronal'],
+        default='sagittal',
+        help='Brain MRI view to process (sagittal, axial, or coronal)'
+    )
+    parser.add_argument(
+        '--epoch',
+        type=int,
+        default=5,
+        help='Model epoch to use'
+    )
     args = parser.parse_args()
     
     print("="*80)
     print("GENERATING FIXED RESULTS FOR DR. KIHO IM")
-    print(f"Using Sagittal Model - Epoch {args.epoch}")
+    print(f"Using {args.view.upper()} Model - Epoch {args.epoch}")
     print("FIXES: Accurate histogram, Exclude BCH_Placenta, Consistent brain mask")
     print("="*80)
     
-    data = load_data()
-    gen = load_model(epoch=args.epoch)
+    data = load_data(view=args.view)
+    gen = load_model(view=args.view, epoch=args.epoch)
     
-    output_dir = Path(f'presentation_results_sagittal_epoch{args.epoch}_FIXED')
+    output_dir = Path(f'presentation_results_{args.view}_epoch{args.epoch}_FIXED')
     output_dir.mkdir(exist_ok=True)
     
     # 1. Generate fixed histogram
@@ -377,7 +392,8 @@ def main():
     # 2. Generate examples
     selected = create_good_examples(
         data, gen,
-        output_dir / 'sagittal_examples',
+        output_dir / f'{args.view}_examples',
+        view=args.view,
         n_examples=5
     )
     
@@ -386,8 +402,8 @@ def main():
     print("="*80)
     print(f"\nResults: {output_dir}/")
     print(f"  - histogram_before_after_FIXED.png")
-    print(f"  - sagittal_examples/ ({len(selected)} examples)")
-    print("\nNote: Using SAGITTAL views (existing trained model)")
+    print(f"  - {args.view}_examples/ ({len(selected)} examples)")
+    print(f"\nNote: Using {args.view.upper()} views with trained model")
     print("All examples show consistent anatomical orientation")
     print("="*80)
 
